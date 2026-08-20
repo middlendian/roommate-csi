@@ -1,6 +1,6 @@
 # roommate-csi — v1 design
 
-**Status:** proposed
+**Status:** approved
 **Date:** 2026-08-20
 
 A CSI driver that mounts a Kubernetes `Secret` or `ConfigMap` as a
@@ -743,7 +743,11 @@ if this is ever needed.
    and has not been validated against real lock-hold durations.
 4. **`NodeGetVolumeStats`.** Deferred from v1. Would report the 1 MiB
    ceiling and current serialized size.
-5. **Consumer cooperation.** The double-checked pattern (lock → re-read →
+5. **RBAC setup tooling.** Deliberately deferred. v1 ships the
+   `roommate-user` `ClusterRole` and documents the per-object `Role`; the
+   operator applies them by hand. A kustomize component or CLI helper to
+   generate the tightly-scoped pair is a later cleanup, not a v1 concern.
+6. **Consumer cooperation.** The double-checked pattern (lock → re-read →
    *already refreshed?* → maybe write) is what makes this safe. A consumer
    that unconditionally refreshes after taking the lock still double-
    refreshes. The guaranteed-fresh read gives it the information; it has to
