@@ -240,3 +240,45 @@ func TestSetattrTruncateStandalone(t *testing.T) {
 		t.Fatalf("size = %d, want 5", info.Size())
 	}
 }
+
+// TestFlockRepinDropsDeletedKey proves the lock's mandatory fresh read is
+// truthful even when the key was deleted out from under the handle: keeping
+// the pre-lock, pinned bytes as though nothing happened would answer "did
+// someone already change this?" falsely for exactly the case — a delete —
+// most likely to matter.
+func TestFlockRepinDropsDeletedKey(t *testing.T) {
+	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
+	store := vol.Store.(*recordingStore)
+	path := filepath.Join(dir, "session.key")
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if info, err := f.Stat(); err != nil {
+		t.Fatalf("Stat before lock: %v", err)
+	} else if info.Size() != 2 {
+		t.Fatalf("size before lock = %d, want 2 (pinned %q)", info.Size(), "v1")
+	}
+
+	// The key is deleted directly in the store, not via vol.Cache.Set (which
+	// the mandatory fresh read would just overwrite): this is what a real
+	// DELETE from another writer looks like by the time this handle's flock
+	// forces a quorum read.
+	store.setSnap(&Snapshot{Data: map[string][]byte{}, ResourceVersion: "2"})
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("Flock: %v", err)
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat after lock: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("size after lock = %d, want 0 — the key was deleted in the fresh read; "+
+			"stale pre-lock bytes must not survive the re-pin", info.Size())
+	}
+}

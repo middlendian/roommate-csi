@@ -260,6 +260,19 @@ func (h *handle) setlk(ctx context.Context, lk *fuse.FileLock, flags uint32, blo
 		h.snap = snap
 		if value, ok := snap.Get(h.key); ok {
 			h.buf = value
+		} else {
+			// The key is gone in the fresh read: some other writer deleted
+			// it between this handle's Open and this lock's acquisition.
+			// Explicitly drop to empty rather than falling through and
+			// leaving the pre-lock bytes in h.buf — the entire point of the
+			// mandatory quorum read is a truthful answer to "did someone
+			// already change this?", and silently keeping stale content
+			// here would answer that question falsely for exactly the
+			// case (a delete) most likely to matter. Matches Unix
+			// unlink-while-open semantics loosely: the fd stays valid, but
+			// unlike a real unlink, a lock holder here explicitly asked for
+			// the current truth, so it gets an empty file, not a frozen one.
+			h.buf = nil
 		}
 	}
 	h.mu.Unlock()

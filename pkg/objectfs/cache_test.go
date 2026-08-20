@@ -51,6 +51,17 @@ func (s *stubStore) getCount() int {
 	return s.gets
 }
 
+// setSnap replaces the stub's underlying snapshot, so a later Get reflects
+// it. Unlike driving a change through Cache.Set, this simulates what a real
+// remote change (e.g. another writer's delete) looks like by the time a
+// mandatory quorum read (Cache.Fresh) reaches the store — Cache.Set alone
+// would just be overwritten by that same quorum read.
+func (s *stubStore) setSnap(snap *Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap = snap
+}
+
 func (s *stubStore) Watch(context.Context, string) (watch.Interface, error) {
 	s.mu.Lock()
 	s.watchCalls++

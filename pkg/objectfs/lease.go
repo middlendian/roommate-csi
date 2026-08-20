@@ -41,9 +41,13 @@ type LeaseManager struct {
 	// Lease as unclaimed and both writing themselves in as holder: a real API
 	// server catches that via a resourceVersion conflict on the loser's
 	// write, but nothing about this type requires the backing store to
-	// enforce that — closing the window locally removes the dependency. Left
-	// nil for a bare NewLeaseManager (as in this package's tests), which
-	// never races itself.
+	// enforce that — closing the window locally removes the dependency.
+	// TryAcquire only ever *tries* this lock (TryLock, never Lock): it backs
+	// both the blocking Acquire poll loop and the non-blocking flock(LOCK_NB)
+	// path, and LOCK_NB must fail fast rather than stall — with no bound
+	// independent of the caller's ctx — behind another handle's in-flight API
+	// call for this Volume. Left nil for a bare NewLeaseManager (as in this
+	// package's tests), which never races itself.
 	local *sync.Mutex
 
 	mu      sync.Mutex
@@ -79,8 +83,17 @@ func (m *LeaseManager) TryAcquire(ctx context.Context) (bool, error) {
 	}
 	m.mu.Unlock()
 
+	// local is taken non-blockingly: TryAcquire backs both the non-blocking
+	// flock(LOCK_NB) path and Acquire's blocking poll loop, and LOCK_NB must
+	// fail fast rather than stall behind another handle's in-flight API
+	// call for this Volume. If someone else is already mid-attempt, treat
+	// that exactly like losing the race on the Lease itself: report not-ok
+	// and let the caller decide whether to retry (Acquire) or return
+	// EWOULDBLOCK (a bare TryAcquire).
 	if m.local != nil {
-		m.local.Lock()
+		if !m.local.TryLock() {
+			return false, nil
+		}
 		defer m.local.Unlock()
 	}
 
