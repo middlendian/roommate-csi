@@ -10,6 +10,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -36,12 +38,28 @@ type NodeServer struct {
 	nodeID   string
 	registry *mounts.Registry
 	log      *slog.Logger
+
+	// locksMu guards locks, the per-target lock table used to serialize the
+	// first-publish check-then-act sequence. See targetLock's doc comment.
+	locksMu sync.Mutex
+	locks   map[string]*targetLock
+
+	// publishAttempts counts calls to publish, across all targets. The
+	// registry-hit re-check under target's lock exists specifically to keep
+	// this at exactly one call per successful first publish: a second call
+	// racing in would otherwise re-run objectfs.Mount over an
+	// already-published target and, if that somehow succeeded, overwrite
+	// its Registry entry — stranding the first mount's watch goroutine and
+	// FUSE server with nothing left pointing at them to tear down. Tests
+	// assert on this counter to catch that regression directly, since a
+	// swallowed error alone would not reveal it.
+	publishAttempts atomic.Int64
 }
 
 // NewNodeServer returns a NodeServer that identifies as nodeID and records
 // published mounts in reg.
 func NewNodeServer(nodeID string, reg *mounts.Registry, log *slog.Logger) *NodeServer {
-	return &NodeServer{nodeID: nodeID, registry: reg, log: log}
+	return &NodeServer{nodeID: nodeID, registry: reg, log: log, locks: map[string]*targetLock{}}
 }
 
 // NodeGetCapabilities advertises nothing.
@@ -63,10 +81,15 @@ func (n *NodeServer) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi
 // A target already in the registry is a republish: it swaps the token
 // atomically and returns immediately, without erroring, no matter what the
 // request carries — see the type doc for why an error here is destructive.
+// This fast path never takes a lock.
+//
 // A target absent from the registry but present in the state file is a
 // remount after a plugin restart, which fails the same way: silently, with
 // a retry on the next republish. Only a genuine first publish is allowed to
-// return an error.
+// return an error — and even that decision is made under target's lock, so
+// a CO retry racing an in-flight publish for the same target cannot
+// independently reach the same conclusion and double-publish. See
+// targetLock's doc comment for why that race matters.
 func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	target := req.GetTargetPath()
 	if req.GetVolumeId() == "" || target == "" {
@@ -74,21 +97,33 @@ func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	}
 	vc := req.GetVolumeContext()
 
-	// Republish: swap the token and return. NEVER error from here — kubelet
+	// Republish fast path: no lock, ever. NEVER error from here — kubelet
 	// deletes the mount point when a republish fails, and later successful
 	// calls cannot restore the pod's view (kubernetes/kubernetes#121271). A
 	// rejected token surfaces as EACCES from the FUSE data path instead,
 	// which is the correct layer to fail at: revocation still bites, the
 	// mount survives, and buffered writes are not destroyed by a blip.
 	if live, ok := n.registry.Get(target); ok {
-		if tok, err := podtoken.Extract(vc); err == nil {
-			live.Token.Store(&tok)
-		}
+		swapToken(vc, live)
+		return &csi.NodePublishVolumeResponse{}, nil
+	}
+
+	// Get missed. Serialize on target's lock before deciding whether this is
+	// a genuine first publish, a restart remount, or a retry racing an
+	// in-flight call: without it, two concurrent misses could both decide
+	// the target has never published and both call publish().
+	tl := n.lockTarget(target)
+	defer n.unlockTarget(target, tl)
+
+	// Re-check under the lock: whoever we waited on may have just published
+	// this target, in which case this is really the fast path above.
+	if live, ok := n.registry.Get(target); ok {
+		swapToken(vc, live)
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 
 	// Known target with no live mount means the plugin restarted. Rebuild it,
-	// and stay silent on failure for the same reason.
+	// and stay silent on failure for the same reason as the fast path above.
 	restarting := n.registry.WasPublished(target)
 
 	if err := n.publish(ctx, target, vc); err != nil {
@@ -102,9 +137,19 @@ func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
+// swapToken installs the token carried by vc into live's atomic slot, if the
+// request carries a usable one. It is silent otherwise: a registry hit must
+// never fail out of the republish path.
+func swapToken(vc map[string]string, live *mounts.Live) {
+	if tok, err := podtoken.Extract(vc); err == nil {
+		live.Token.Store(&tok)
+	}
+}
+
 // publish does the real work of a first mount. Errors returned here are
 // surfaced by kubelet as a FailedMount event, so they must be actionable.
 func (n *NodeServer) publish(ctx context.Context, target string, vc map[string]string) error {
+	n.publishAttempts.Add(1)
 	if vc[keyEphemeral] != "true" {
 		return status.Error(codes.InvalidArgument,
 			"roommate serves inline ephemeral volumes only; declare the volume "+
