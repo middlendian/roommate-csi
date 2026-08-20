@@ -119,16 +119,19 @@ func (r *Root) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 	return 0
 }
 
-// Setattr handles the truncate half of O_TRUNC and refuses everything else.
-// Modes and ownership come from mount attributes and are not stored in the
-// object, so chmod cannot round-trip.
+// Setattr handles truncate and refuses everything else. Modes and ownership
+// come from mount attributes and are not stored in the object, so chmod
+// cannot round-trip.
 //
-// go-fuse never negotiates FUSE_CAP_ATOMIC_O_TRUNC (see doInit in its fuse
-// package), so the kernel does not fold O_TRUNC into the OPEN request; for
-// an existing file it sends a separate SETATTR(size=0) *before* OPEN, with
-// no file handle attached yet. fh is only a *handle once Open has run, so
-// that pre-open truncate falls to truncateCommitted, which commits directly
-// since there is no handle to buffer it into.
+// O_TRUNC on open never reaches here: mount.go negotiates
+// FUSE_CAP_ATOMIC_O_TRUNC, so the kernel folds O_TRUNC into the OPEN request
+// and File.Open handles it directly, buffering the truncate into the new
+// handle instead of committing it live. The only way to reach this size
+// branch without an open handle is a genuine standalone truncate(2) (or
+// ftruncate on an fd this driver didn't hand out a *handle for), which has
+// nowhere to buffer, so truncateCommitted commits it immediately — that is
+// correct there, since there is no handle whose flush/fsync/release could
+// ever pick it up.
 func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	if _, ok := in.GetMode(); ok {
 		return syscall.EPERM
@@ -154,8 +157,8 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 }
 
 // truncateCommitted resizes the key's current value and commits immediately.
-// Used only when Setattr has no open handle to buffer the change into (see
-// Setattr's doc comment).
+// Reached only for a standalone truncate(2)/ftruncate with no *handle to
+// buffer into — see Setattr's doc comment.
 func (f *File) truncateCommitted(ctx context.Context, size uint64) syscall.Errno {
 	snap := f.vol.Cache.MaybeFresh(ctx)
 	if snap == nil {
@@ -232,7 +235,16 @@ func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 // is served from that pinned value for its whole lifetime, reproducing the
 // atomicity of kubelet's ..data flip: a handle never observes a partial
 // transition, and a read can never splice two versions together.
-func (f *File) Open(ctx context.Context, _ uint32) (fs.FileHandle, uint32, syscall.Errno) {
+//
+// O_TRUNC is handled here, not via a live Setattr commit: mount.go
+// negotiates FUSE_CAP_ATOMIC_O_TRUNC, so the kernel folds O_TRUNC into this
+// OPEN request rather than sending a separate pre-open SETATTR. An O_TRUNC
+// open therefore stages an empty, dirty handle exactly like Root.Create's
+// new-file case — the truncate only takes effect when this handle commits
+// (flush, fsync, or release), never before, so a write that never lands
+// (rejected, or the process dying first) leaves the original value intact
+// rather than losing it to an empty commit that already happened.
+func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	snap := f.vol.Cache.MaybeFresh(ctx)
 	if snap == nil {
 		return nil, 0, syscall.EIO
@@ -240,6 +252,11 @@ func (f *File) Open(ctx context.Context, _ uint32) (fs.FileHandle, uint32, sysca
 	value, ok := snap.Get(f.key)
 	if !ok {
 		return nil, 0, syscall.ENOENT
+	}
+	if flags&syscall.O_TRUNC != 0 {
+		h := newHandle(f.vol, f.key, snap, nil)
+		h.dirty = true // an O_TRUNC open must still produce an empty value even if nothing is written
+		return h, 0, 0
 	}
 	return newHandle(f.vol, f.key, snap, value), 0, 0
 }

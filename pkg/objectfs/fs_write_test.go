@@ -23,6 +23,29 @@ func TestWriteCommitsOnClose(t *testing.T) {
 	}
 }
 
+// os.WriteFile's open(O_TRUNC) on a key that already exists must fold the
+// truncate into the same handle as the write, producing exactly one Patch.
+// A second, earlier Patch would mean the truncate committed live before the
+// real content did — the bug this test exists to catch: if the real content
+// then never lands (rejected, or the process dying before flush), the key
+// is left permanently empty with no way to recover the original value. See
+// mount.go's CAP_ATOMIC_O_TRUNC comment and File.Open's O_TRUNC handling.
+func TestOpenTruncOnExistingKeyIssuesExactlyOnePatch(t *testing.T) {
+	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
+	store := vol.Store.(*recordingStore)
+
+	if err := os.WriteFile(filepath.Join(dir, "session.key"), []byte("v2"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if got := store.patchCount(); got != 1 {
+		t.Fatalf("patches = %d, want exactly 1 — a second patch means the truncate committed live, ahead of the real content", got)
+	}
+	if got := string(store.lastSet()["session.key"]); got != "v2" {
+		t.Fatalf("patched value = %q, want v2", got)
+	}
+}
+
 // A merge patch must mention only what changed — that is what makes
 // concurrent writes to different keys structurally safe.
 func TestWritePatchesOnlyTheWrittenKey(t *testing.T) {
@@ -108,8 +131,15 @@ func TestChmodIsRefused(t *testing.T) {
 	}
 }
 
+// A rejected oversized write must leave the key's original value intact.
+// Before CAP_ATOMIC_O_TRUNC negotiation, the pre-open truncate for O_TRUNC
+// committed an empty value immediately and unconditionally; when the real
+// content was then rejected here for being too large, nothing ever
+// recommitted the original "1" — the key was left permanently empty. That
+// is the property that actually matters, not just that the write errors.
 func TestWriteBeyondCeilingReturnsENOSPC(t *testing.T) {
-	dir, _ := mountForTest(t, map[string][]byte{"a": []byte("1")})
+	dir, vol := mountForTest(t, map[string][]byte{"a": []byte("1")})
+	store := vol.Store.(*recordingStore)
 
 	big := []byte(strings.Repeat("x", MaxObjectBytes+1))
 	err := os.WriteFile(filepath.Join(dir, "a"), big, 0o600)
@@ -118,6 +148,18 @@ func TestWriteBeyondCeilingReturnsENOSPC(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no space") {
 		t.Fatalf("err = %v, want ENOSPC", err)
+	}
+
+	if got := store.patchCount(); got != 0 {
+		t.Fatalf("patches = %d, want 0 — the rejected write must never have reached the store", got)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "a"))
+	if err != nil {
+		t.Fatalf("ReadFile after rejected write: %v", err)
+	}
+	if string(got) != "1" {
+		t.Fatalf("value after rejected write = %q, want the original \"1\" to survive", got)
 	}
 }
 

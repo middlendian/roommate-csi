@@ -14,14 +14,28 @@ import (
 //
 // EnableLocks makes the kernel negotiate FUSE_CAP_FLOCK_LOCKS, without which
 // flock never reaches the filesystem at all.
+//
+// ExtraCapabilities negotiates FUSE_CAP_ATOMIC_O_TRUNC, which folds O_TRUNC
+// into the OPEN request for open(O_TRUNC) on an existing file, instead of
+// the kernel sending a separate SETATTR(size=0) *before* OPEN — a request
+// with no file handle attached yet, since the file isn't open. Without this,
+// File.Open never sees O_TRUNC and the truncate has nowhere to buffer, so it
+// would have to commit immediately, outside the handle's buffer/commit-on-
+// close model — for the primary rewrite-an-existing-key idiom
+// (os.WriteFile), that risks leaving a key permanently empty if the
+// following write never lands (rejected, or the process dies first). With
+// this negotiated, File.Open handles O_TRUNC directly; SETATTR's fh-less
+// path is then only reachable from a genuine standalone truncate(2), where
+// committing immediately is correct because there is no handle at all.
 func Mount(dir string, v *Volume) (*fuse.Server, error) {
 	root := &Root{vol: v}
 	return fs.Mount(dir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther:  true,
-			FsName:      v.Cfg.ObjectName,
-			Name:        "roommate",
-			EnableLocks: true,
+			AllowOther:        true,
+			FsName:            v.Cfg.ObjectName,
+			Name:              "roommate",
+			EnableLocks:       true,
+			ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
 		},
 	})
 }

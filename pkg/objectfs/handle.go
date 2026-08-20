@@ -26,10 +26,10 @@ type handle struct {
 	// directly (fuse.ReadResultData aliases rather than copies) and go-fuse
 	// writes that slice to the kernel after Read returns and h.mu is
 	// released. So: never mutate buf's existing backing array in place —
-	// not here, not in the write path. A future Write must build its result
-	// in a freshly allocated slice and swap it in, never
-	// copy(buf[off:], data), or it can tear a read that is still in flight
-	// against the old array.
+	// not here, not in the write path. Write and truncate both build their
+	// result in a freshly allocated slice and swap it in, never
+	// copy(buf[off:], data) or a reslice of the existing array, or they
+	// could tear a read that is still in flight against the old array.
 	buf []byte
 	// dirty reports whether buf holds writes not yet committed to the store.
 	dirty bool

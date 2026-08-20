@@ -14,10 +14,10 @@ import (
 // recordingStore captures what Patch was asked to do.
 //
 // mu guards set/del/patches: a test driving Patch through a real FUSE mount
-// (pkg/objectfs's fs_write_test.go and fs_lock_test.go) calls Patch from the
-// go-fuse server's own goroutine while the test goroutine reads these
-// fields, so plain field access races under -race even though the syscalls
-// that trigger each Patch call are themselves ordered.
+// (pkg/objectfs's fs_write_test.go) calls Patch from the go-fuse server's
+// own goroutine while the test goroutine reads these fields, so plain field
+// access races under -race even though the syscalls that trigger each Patch
+// call are themselves ordered.
 type recordingStore struct {
 	*stubStore
 
