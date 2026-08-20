@@ -2,6 +2,7 @@ package mounts
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,5 +131,72 @@ func TestRegistryTokenSwapIsRaceFree(t *testing.T) {
 	got.Token.Store(&tok)
 	if v := got.Token.Load(); v == nil || *v != "tok-1" {
 		t.Fatalf("Token = %v, want tok-1", v)
+	}
+}
+
+// TestRegistryConcurrentPutDeleteSurvivesRestart verifies that concurrent
+// Put and Delete operations on different targets don't lose updates. This
+// catches a lost-update race where the persist() method released the mutex
+// before file I/O, allowing two concurrent calls to race their snapshots
+// and the later one to overwrite the earlier one's changes to disk.
+func TestRegistryConcurrentPutDeleteSurvivesRestart(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "published.json")
+	r, err := NewRegistry(state)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Do many concurrent Put/Delete operations on different targets.
+	// With the lost-update race, some records would silently vanish from disk.
+	done := make(chan error, 20)
+	for i := 0; i < 10; i++ {
+		target := fmt.Sprintf("/t/%d", i)
+		go func(tgt string) {
+			done <- r.Put(tgt, newLive(), testMount(tgt))
+		}(target)
+	}
+	for i := 10; i < 20; i++ {
+		target := fmt.Sprintf("/t/%d", i)
+		go func(tgt string) {
+			done <- r.Put(tgt, newLive(), testMount(tgt))
+		}(target)
+	}
+
+	for i := 0; i < 10; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	// Interleave some deletes with the remaining puts.
+	for i := 0; i < 5; i++ {
+		target := fmt.Sprintf("/t/%d", i)
+		if err := r.Delete(context.Background(), target); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+	}
+
+	// After restart, verify the expected records survived.
+	reopen, err := NewRegistry(state)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		target := fmt.Sprintf("/t/%d", i)
+		if reopen.WasPublished(target) {
+			t.Errorf("deleted target %s still in state", target)
+		}
+	}
+	for i := 5; i < 20; i++ {
+		target := fmt.Sprintf("/t/%d", i)
+		if !reopen.WasPublished(target) {
+			t.Errorf("surviving target %s lost from state after restart", target)
+		}
 	}
 }

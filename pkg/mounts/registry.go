@@ -75,6 +75,9 @@ func NewRegistry(statePath string) (*Registry, error) {
 	if err := json.Unmarshal(data, &records); err != nil {
 		return r, nil // corrupt: start empty
 	}
+	if records == nil {
+		records = map[string]Mount{}
+	}
 	r.records = records
 	return r, nil
 }
@@ -133,11 +136,16 @@ func (r *Registry) Delete(_ context.Context, target string) error {
 }
 
 // persist writes the state file atomically, so a crash mid-write cannot leave
-// a half-written file that reads as corrupt on the next start.
+// a half-written file that reads as corrupt on the next start. The mutex is
+// held across the entire operation (marshal, write, rename) to prevent
+// concurrent persist calls from racing and losing updates: without this,
+// two concurrent Put/Delete operations could lead to one's changes being
+// silently overwritten by the other's stale snapshot.
 func (r *Registry) persist() error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	data, err := json.MarshalIndent(r.records, "", "  ")
-	r.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -146,6 +154,8 @@ func (r *Registry) persist() error {
 	}
 	tmp := r.statePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		// Clean up stale temp file on error.
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, r.statePath)
