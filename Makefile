@@ -2,7 +2,7 @@ BIN     := bin
 PKGS    := ./...
 GOFILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
-.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean
+.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker
 
 build:
 	go build -o $(BIN)/roommate-node ./cmd/node
@@ -44,3 +44,9 @@ check: fmt-check vet lint tidy-check cover build
 
 clean:
 	rm -rf $(BIN) cover.out
+
+IMAGE   ?= ghcr.io/middlendian/roommate-csi
+TAG     ?= dev
+
+docker:
+	docker build --build-arg VERSION=$(TAG) -t $(IMAGE):$(TAG) .

@@ -26,3 +26,16 @@ jobs:
         run: make fmt-check vet tidy-check cover
       - name: go build ./...
         run: go build ./...
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: make docker
+        run: make docker
+      - name: smoke test -h
+        run: docker run --rm ghcr.io/middlendian/roommate-csi:dev -h
+      - name: smoke test fusermount3 is present
+        # fuse3 supplies fusermount3, which go-fuse shells out to for
+        # unmounting; confirm it's actually in the image.
+        run: docker run --rm --entrypoint fusermount3 ghcr.io/middlendian/roommate-csi:dev -V
