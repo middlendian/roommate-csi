@@ -15,6 +15,13 @@ jobs:
         with:
           version: v2.5.0
           args: --timeout=5m
+      - name: enable FUSE allow_other
+        # The pkg/objectfs FUSE tests mount with AllowOther, matching
+        # production (the driver runs as root in a privileged DaemonSet,
+        # where this restriction doesn't apply). The runner user is
+        # unprivileged, so fusermount3 refuses -o allow_other unless
+        # user_allow_other is set in /etc/fuse.conf.
+        run: echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
       - name: make check
         run: make fmt-check vet tidy-check cover
       - name: go build ./...

@@ -20,7 +20,15 @@ type handle struct {
 
 	mu   sync.Mutex
 	snap *Snapshot
-	buf  []byte
+	// buf is the handle's pinned content. Read hands out sub-slices of it
+	// directly (fuse.ReadResultData aliases rather than copies) and go-fuse
+	// writes that slice to the kernel after Read returns and h.mu is
+	// released. So: never mutate buf's existing backing array in place —
+	// not here, not in the write path. A future Write must build its result
+	// in a freshly allocated slice and swap it in, never
+	// copy(buf[off:], data), or it can tear a read that is still in flight
+	// against the old array.
+	buf []byte
 	// dirty is set by the write path (Task 12); unused until then.
 	dirty bool //nolint:unused
 

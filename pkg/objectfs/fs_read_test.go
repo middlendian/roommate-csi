@@ -75,8 +75,15 @@ func TestStatMissingFile(t *testing.T) {
 // A handle pins its snapshot at open. A concurrent remote change must not be
 // visible through it — this is what reproduces kubelet's atomic ..data flip
 // and prevents a read splicing two versions together.
+//
+// The change is landed via vol.Cache.Set, the same layer Getattr, Lookup,
+// and Open all read through (f.vol.Cache.MaybeFresh). Mutating the backing
+// store directly would not prove anything: StalenessBound is an hour, so
+// Cache never re-queries the store during this test, and a regression that
+// made handle.Read re-consult Cache on every call (instead of serving its
+// pinned buffer) would go undetected.
 func TestOpenHandlePinsSnapshot(t *testing.T) {
-	dir, store := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
+	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
 
 	f, err := os.Open(filepath.Join(dir, "session.key"))
 	if err != nil {
@@ -88,10 +95,8 @@ func TestOpenHandlePinsSnapshot(t *testing.T) {
 		}
 	}()
 
-	// Remote change lands after open.
-	store.mu.Lock()
-	store.snap = &Snapshot{Data: map[string][]byte{"session.key": []byte("v2")}, ResourceVersion: "2"}
-	store.mu.Unlock()
+	// Remote change lands in the cache after open.
+	vol.Cache.Set(&Snapshot{Data: map[string][]byte{"session.key": []byte("v2")}, ResourceVersion: "2"})
 
 	buf := make([]byte, 16)
 	n, err := f.Read(buf)

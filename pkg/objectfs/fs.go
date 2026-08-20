@@ -57,7 +57,7 @@ func (r *Root) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		return nil, syscall.ENOENT
 	}
 	child := &File{vol: r.vol, key: name}
-	r.fillFileAttr(&out.Attr, len(value))
+	fillFileAttr(&out.Attr, r.vol.Cfg, len(value))
 	return r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG}), 0
 }
 
@@ -67,12 +67,12 @@ func (r *Root) Mkdir(context.Context, string, uint32, *fuse.EntryOut) (*fs.Inode
 }
 
 // fillFileAttr populates attr for a regular file of the given size using
-// Cfg.FileMode, UID, and GID.
-func (r *Root) fillFileAttr(attr *fuse.Attr, size int) {
-	attr.Mode = fuse.S_IFREG | r.vol.Cfg.FileMode
+// cfg's FileMode, UID, and GID.
+func fillFileAttr(attr *fuse.Attr, cfg Config, size int) {
+	attr.Mode = fuse.S_IFREG | cfg.FileMode
 	attr.Size = uint64(size)
-	attr.Uid = r.vol.Cfg.UID
-	attr.Gid = r.vol.Cfg.GID
+	attr.Uid = cfg.UID
+	attr.Gid = cfg.GID
 	attr.Nlink = 1
 }
 
@@ -88,9 +88,24 @@ var (
 	_ fs.NodeOpener    = (*File)(nil)
 )
 
-// Getattr reports the file's current size and Cfg.FileMode/UID/GID, or
-// ENOENT if the key has since been removed from the snapshot.
-func (f *File) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+// Getattr reports the file's size and Cfg.FileMode/UID/GID.
+//
+// If fh is an open handle, the size comes from that handle's pinned buffer
+// rather than the live snapshot — otherwise fstat(fd) could report a size
+// newer than what Read on that same fd will ever return (the object grew or
+// shrank after Open), producing a short or over-long read that looks exactly
+// like the spliced-read failure pinning exists to prevent. With no open
+// handle (a bare path-based stat), the live snapshot is the only source of
+// truth, and ENOENT is returned if the key has since been removed from it.
+func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	if h, ok := fh.(*handle); ok {
+		h.mu.Lock()
+		size := len(h.buf)
+		h.mu.Unlock()
+		fillFileAttr(&out.Attr, f.vol.Cfg, size)
+		return 0
+	}
+
 	snap := f.vol.Cache.MaybeFresh(ctx)
 	if snap == nil {
 		return syscall.EIO
@@ -99,11 +114,7 @@ func (f *File) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) 
 	if !ok {
 		return syscall.ENOENT
 	}
-	out.Mode = fuse.S_IFREG | f.vol.Cfg.FileMode
-	out.Size = uint64(len(value))
-	out.Uid = f.vol.Cfg.UID
-	out.Gid = f.vol.Cfg.GID
-	out.Nlink = 1
+	fillFileAttr(&out.Attr, f.vol.Cfg, len(value))
 	return 0
 }
 
