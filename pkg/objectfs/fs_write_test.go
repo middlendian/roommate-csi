@@ -15,10 +15,10 @@ func TestWriteCommitsOnClose(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if store.patches == 0 {
+	if store.patchCount() == 0 {
 		t.Fatal("close did not commit")
 	}
-	if got := string(store.set["session.key"]); got != "v2" {
+	if got := string(store.lastSet()["session.key"]); got != "v2" {
 		t.Fatalf("patched value = %q, want v2", got)
 	}
 }
@@ -36,11 +36,12 @@ func TestWritePatchesOnlyTheWrittenKey(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if _, ok := store.set["config.json"]; ok {
+	set := store.lastSet()
+	if _, ok := set["config.json"]; ok {
 		t.Fatal("patch mentioned config.json, which was never written")
 	}
-	if len(store.set) != 1 {
-		t.Fatalf("patch set = %v, want only session.key", store.set)
+	if len(set) != 1 {
+		t.Fatalf("patch set = %v, want only session.key", set)
 	}
 }
 
@@ -51,7 +52,7 @@ func TestCreateNewFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "new.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if got := string(store.set["new.json"]); got != "{}" {
+	if got := string(store.lastSet()["new.json"]); got != "{}" {
 		t.Fatalf("new.json = %q, want {}", got)
 	}
 }
@@ -72,11 +73,12 @@ func TestUnlinkDeletesKey(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "b")); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if len(store.del) != 1 || store.del[0] != "b" {
-		t.Fatalf("del = %v, want [b]", store.del)
+	del := store.lastDel()
+	if len(del) != 1 || del[0] != "b" {
+		t.Fatalf("del = %v, want [b]", del)
 	}
-	if len(store.set) != 0 {
-		t.Fatalf("unlink also set keys: %v", store.set)
+	if set := store.lastSet(); len(set) != 0 {
+		t.Fatalf("unlink also set keys: %v", set)
 	}
 }
 
@@ -87,11 +89,12 @@ func TestRenameIsCopyPlusDelete(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "old.json"), filepath.Join(dir, "new.json")); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	if got := string(store.set["new.json"]); got != "data" {
+	if got := string(store.lastSet()["new.json"]); got != "data" {
 		t.Fatalf("new.json = %q, want data", got)
 	}
-	if len(store.del) != 1 || store.del[0] != "old.json" {
-		t.Fatalf("del = %v, want [old.json]", store.del)
+	del := store.lastDel()
+	if len(del) != 1 || del[0] != "old.json" {
+		t.Fatalf("del = %v, want [old.json]", del)
 	}
 }
 
@@ -131,13 +134,13 @@ func TestNoWritebackBeforeClose(t *testing.T) {
 	if _, err := f.Write([]byte("2")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if store.patches != 0 {
+	if store.patchCount() != 0 {
 		t.Fatal("write reached the API server before flush")
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if store.patches == 0 {
+	if store.patchCount() == 0 {
 		t.Fatal("close did not commit")
 	}
 }

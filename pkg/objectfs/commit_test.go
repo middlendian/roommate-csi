@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,8 +12,16 @@ import (
 )
 
 // recordingStore captures what Patch was asked to do.
+//
+// mu guards set/del/patches: a test driving Patch through a real FUSE mount
+// (pkg/objectfs's fs_write_test.go and fs_lock_test.go) calls Patch from the
+// go-fuse server's own goroutine while the test goroutine reads these
+// fields, so plain field access races under -race even though the syscalls
+// that trigger each Patch call are themselves ordered.
 type recordingStore struct {
 	*stubStore
+
+	mu       sync.Mutex
 	set      map[string][]byte
 	del      []string
 	patchErr error
@@ -24,9 +33,33 @@ func newRecordingStore(data map[string][]byte) *recordingStore {
 }
 
 func (r *recordingStore) Patch(_ context.Context, set map[string][]byte, del []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.patches++
 	r.set, r.del = set, del
 	return r.patchErr
+}
+
+// patchCount returns the number of Patch calls so far, synchronized so it is
+// safe to read from a goroutine other than the one driving Patch.
+func (r *recordingStore) patchCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.patches
+}
+
+// lastSet returns the set map from the most recent Patch call.
+func (r *recordingStore) lastSet() map[string][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.set
+}
+
+// lastDel returns the del slice from the most recent Patch call.
+func (r *recordingStore) lastDel() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.del
 }
 
 func TestCommitPatchesOnlyDirtyKeys(t *testing.T) {
