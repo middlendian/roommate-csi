@@ -178,15 +178,15 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   namespace: my-app
-  name: roommate-claude-credentials
+  name: roommate-oauth-credentials
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["claude-credentials"]
+    resourceNames: ["oauth-credentials"]
     verbs: ["get", "watch", "patch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    resourceNames: ["roommate-claude-credentials"]
+    resourceNames: ["roommate-oauth-credentials"]
     verbs: ["get", "create", "update"]
 ```
 
@@ -220,7 +220,7 @@ use `allow_other`. Mounting as root does not require `user_allow_other` in
 The object's `data` map is the directory. Each key is one file.
 
 ```
-Secret claude-credentials              /creds/
+Secret oauth-credentials              /creds/
   data:                                  ├── .credentials.json
     .credentials.json: <base64>          ├── config.json
     config.json:       <base64>          └── session.key
@@ -378,7 +378,7 @@ restructuring.
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
-  name: roommate-claude-credentials   # default: roommate-<objectName>
+  name: roommate-oauth-credentials   # default: roommate-<objectName>
   namespace: my-app                   # always the consuming pod's namespace
 spec:
   holderIdentity: <podUID>:<handleID>
@@ -436,7 +436,7 @@ subdomains, forcing an opaque hashing scheme.
 FIRST publish for a target_path
   volumeContext:
     objectKind = Secret
-    objectName = claude-credentials
+    objectName = oauth-credentials
     csi.storage.k8s.io/pod.namespace            = my-app
     csi.storage.k8s.io/pod.service-account.name = session-runner
     csi.storage.k8s.io/serviceAccount.tokens    = {"": {token, expiry}}
@@ -523,7 +523,7 @@ volumes:
       driver: roommate.csi
       volumeAttributes:
         objectKind: Secret
-        objectName: claude-credentials
+        objectName: oauth-credentials
 ```
 
 The namespace is always the consuming pod's, taken from `podInfoOnMount`
