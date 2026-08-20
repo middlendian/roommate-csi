@@ -193,6 +193,93 @@ rules:
 `patch` rather than `update` is deliberate — it is the narrower grant, and
 the write path only ever patches.
 
+### `resourceNames` constrains the watch implementation
+
+Kubernetes RBAC states that *"if you restrict list or watch by resourceName,
+clients must include a `metadata.name` field selector in their list or watch
+request (that matches the specified resourceName) in order to be
+authorized."*
+
+So the tightly-scoped `Role` above imposes a hard implementation
+requirement, not merely a stylistic one:
+
+```go
+// REQUIRED. Without the field selector this is 403, not a smaller result set.
+w, err := client.CoreV1().Secrets(ns).Watch(ctx, metav1.ListOptions{
+    FieldSelector: fields.OneTermEqualSelector("metadata.name", objectName).String(),
+})
+```
+
+Two consequences:
+
+- **Do not use a shared informer.** A reflector LISTs before it WATCHes, so
+  it would require adding `list` to the grant, and the default factory sets
+  no field selector — it would be denied anyway. A hand-rolled watch loop
+  needs only `get` and `watch`.
+- Resync after a disconnect uses a quorum `GET` by name, which is already
+  authorized by `get` with `resourceNames`.
+
+### Two grant shapes, because a binding cannot narrow a role
+
+A `RoleBinding` has exactly two fields — `subjects` and `roleRef`. There is
+nowhere to put a resource name, and `resourceNames` is exact-match with no
+prefix or glob support. A shared role definition narrowed per-object by the
+binding is therefore **not expressible in RBAC**. The two available shapes
+trade against each other:
+
+| Shape | Narrowed to | Cost |
+|---|---|---|
+| Per-object `Role` (above) + `RoleBinding` | one named object | one Role per object per namespace |
+| Shipped `roommate-user` `ClusterRole` + `RoleBinding` | one namespace | grants access to *every* Secret/ConfigMap in it |
+
+Ship both. The `ClusterRole` is install-time convenience:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roommate-user
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "watch", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+```
+
+Bound with a `RoleBinding` (not a `ClusterRoleBinding`), it applies only
+within that one namespace. It carries no escalation risk: whoever applies
+the binding must already hold those permissions themselves, per RBAC's
+escalation prevention. Operators who want per-object scoping use the `Role`
+above instead — and then must accept the field-selector requirement.
+
+### Why the driver must not create these grants
+
+A tempting idea is a controller that creates the `RoleBinding` at mount
+time. It does not work, for reasons worth recording:
+
+- **There is no hook.** CSI's controller service is never invoked for inline
+  ephemeral volumes — kubelet calls `NodePublishVolume` directly. This would
+  have to be a separate Pod-watching controller or admission webhook.
+- **RBAC forbids it without escalation.** A subject may only create a
+  binding if it already holds every permission in the referenced role, or
+  holds `bind`/`escalate`. Such a controller would therefore need
+  `get`/`watch`/`patch` on all Secrets cluster-wide, or `escalate` — making
+  it a cluster-wide secret reader that mints RBAC on request. Anyone able to
+  create a Pod naming any Secret would obtain it.
+- **It makes the check vacuous.** The safety of inline volumes rests on the
+  API server verifying the pod's *pre-existing* RBAC. Granting that RBAC on
+  demand deletes the authorization rather than automating it.
+- **The policy must live somewhere anyway.** Deciding whether a pod may
+  reach an object *is* authorization; implementing it outside the API server
+  reinvents RBAC with worse guarantees.
+
+Instead, the driver makes the failure self-service: a `PermissionDenied`
+from `NodePublishVolume` surfaces via kubelet's `FailedMount` event in
+`kubectl describe pod`, so its message carries the exact YAML to apply.
+Better ergonomics than the controller, at zero privilege.
+
 ### Why not the alternatives
 
 - **Driver identity + namespaced RBAC.** Makes the already-privileged
@@ -442,9 +529,10 @@ FIRST publish for a target_path
     csi.storage.k8s.io/serviceAccount.tokens    = {"": {token, expiry}}
 
   1. build rest.Config with BearerToken = the pod's token
-  2. quorum GET      403 -> PermissionDenied, naming the SA and missing verb
+  2. quorum GET      403 -> PermissionDenied carrying copy-pasteable RBAC
+                            YAML; surfaces via kubelet's FailedMount event
                      404 -> NotFound
-  3. start watch
+  3. start watch  (metadata.name field selector — required, see RBAC above)
   4. mount FUSE at target_path (allow_other, EnableLocks)
   5. record in registry + published-state file
 
@@ -557,8 +645,11 @@ Requires `/dev/fuse`, which GitHub's `ubuntu-latest` runners provide.
 
 **API semantics** — `envtest` against a real apiserver + etcd, for the
 claims we cannot fake: that merge-patch merges at the key level, that Lease
-CAS rejects a stale writer, and that a quorum `GET` reflects a just-
-completed patch.
+CAS rejects a stale writer, that a quorum `GET` reflects a just-completed
+patch, and — with a real `Role` applied — that a watch **without** the
+`metadata.name` field selector is rejected while one with it succeeds. That
+last case is a fake clientset blind spot and a regression we would otherwise
+only discover in a live cluster.
 
 **End-to-end** — kind, two nodes. The test that matters is the refresh race:
 two pods on different nodes both observe an expired credential, both take
