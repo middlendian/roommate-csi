@@ -16,4 +16,6 @@ jobs:
           version: v2.5.0
           args: --timeout=5m
       - name: make check
-        run: make fmt-check vet tidy-check cover build
+        run: make fmt-check vet tidy-check cover
+      - name: go build ./...
+        run: go build ./...
