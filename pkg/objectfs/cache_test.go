@@ -20,6 +20,10 @@ type stubStore struct {
 	snap     *Snapshot
 	watchCh  chan watch.Event
 	watchErr error
+
+	// watchCalls counts Watch invocations so tests can assert reconnect
+	// attempts are throttled rather than unbounded.
+	watchCalls int
 }
 
 func newStubStore(data map[string][]byte) *stubStore {
@@ -48,10 +52,21 @@ func (s *stubStore) getCount() int {
 }
 
 func (s *stubStore) Watch(context.Context, string) (watch.Interface, error) {
-	if s.watchErr != nil {
-		return nil, s.watchErr
+	s.mu.Lock()
+	s.watchCalls++
+	err := s.watchErr
+	s.mu.Unlock()
+
+	if err != nil {
+		return nil, err
 	}
 	return watch.NewProxyWatcher(s.watchCh), nil
+}
+
+func (s *stubStore) watchCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchCalls
 }
 
 func (s *stubStore) Decode(obj runtime.Object) (*Snapshot, error) {
@@ -172,6 +187,65 @@ func TestCacheRunAppliesWatchEvents(t *testing.T) {
 		select {
 		case <-deadline:
 			t.Fatal("watch event never applied to cache")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// A watch that can never establish — e.g. RBAC granting get but not watch —
+// must not spin Run's Fresh/Watch loop against the API server unthrottled.
+func TestCacheRunBacksOffOnWatchEstablishFailure(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	s.watchErr = errors.New("watch forbidden") // set before Run starts, so no lock is needed here
+
+	c := NewCache(s, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go c.Run(ctx)
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	if got := s.watchCallCount(); got > 10 {
+		t.Fatalf("Watch called %d times in 300ms with a failing watch — want a bounded, backed-off retry count", got)
+	}
+}
+
+// A Deleted event on the watch must not trigger an instant reconnect: Run
+// has to back off first, the same as any other disconnect that isn't a
+// clean, long-lived channel close.
+func TestCacheRunBacksOffAfterDeletedEvent(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	c := NewCache(s, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for s.watchCallCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("initial watch never established")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	s.watchCh <- watch.Event{Type: watch.Deleted}
+
+	// Right after the Deleted event, a reconnect must not have happened yet
+	// — it has to go through backoff first.
+	time.Sleep(50 * time.Millisecond)
+	if got := s.watchCallCount(); got != 1 {
+		t.Fatalf("Watch reconnected instantly after Deleted (calls=%d) — want backoff before retry", got)
+	}
+
+	// It does eventually reconnect.
+	deadline = time.After(2 * time.Second)
+	for s.watchCallCount() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("watch never reconnected after Deleted event")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}

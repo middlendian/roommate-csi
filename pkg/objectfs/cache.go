@@ -2,7 +2,6 @@ package objectfs
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +14,16 @@ import (
 // resync does for native projection.
 const DefaultStalenessBound = 30 * time.Second
 
+// entry pairs a Snapshot with the time it was confirmed current, so a single
+// atomic Load always observes them together. Splitting these across two
+// fields (a pointer plus a separately-locked timestamp) would let a
+// concurrent Set land between the two reads and pair a fresh timestamp with
+// a stale snapshot — a logical TOCTOU that -race cannot see.
+type entry struct {
+	snap     *Snapshot
+	lastSync time.Time
+}
+
 // Cache holds the current Snapshot for one mounted object.
 //
 // Reads are eventual, fed by a watch. The read-after-write guarantee is not
@@ -24,10 +33,7 @@ type Cache struct {
 	store Store
 	bound time.Duration
 
-	snap atomic.Pointer[Snapshot]
-
-	mu       sync.Mutex
-	lastSync time.Time
+	cur atomic.Pointer[entry]
 }
 
 // NewCache returns a Cache over store. A non-positive bound falls back to
@@ -40,7 +46,13 @@ func NewCache(store Store, bound time.Duration) *Cache {
 }
 
 // Current returns the cached Snapshot, or nil if nothing has been fetched.
-func (c *Cache) Current() *Snapshot { return c.snap.Load() }
+func (c *Cache) Current() *Snapshot {
+	e := c.cur.Load()
+	if e == nil {
+		return nil
+	}
+	return e.snap
+}
 
 // Set installs snap as current. Called after a successful write so the
 // writing node reads its own writes without a round trip.
@@ -48,10 +60,7 @@ func (c *Cache) Set(snap *Snapshot) {
 	if snap == nil {
 		return
 	}
-	c.snap.Store(snap)
-	c.mu.Lock()
-	c.lastSync = time.Now()
-	c.mu.Unlock()
+	c.cur.Store(&entry{snap: snap, lastSync: time.Now()})
 }
 
 // Fresh performs a quorum read and installs the result. This is the
@@ -73,24 +82,37 @@ func (c *Cache) Fresh(ctx context.Context) (*Snapshot, error) {
 // served anyway. A stale value costs the consumer a 401 and a retry; a
 // failed read costs it an outage.
 func (c *Cache) MaybeFresh(ctx context.Context) *Snapshot {
-	cur := c.snap.Load()
-
-	c.mu.Lock()
-	age := time.Since(c.lastSync)
-	c.mu.Unlock()
-
-	if cur != nil && age < c.bound {
-		return cur
+	e := c.cur.Load()
+	if e != nil && time.Since(e.lastSync) < c.bound {
+		return e.snap
 	}
 	if snap, err := c.Fresh(ctx); err == nil {
 		return snap
 	}
-	return cur
+	if e != nil {
+		return e.snap
+	}
+	return nil
 }
+
+// watchOutcome reports why watchOnce returned, so Run knows whether the
+// reconnect it is about to attempt needs to be throttled.
+type watchOutcome int
+
+const (
+	watchStopped watchOutcome = iota // ctx was cancelled; caller must return
+	watchClosed                      // result channel closed normally (e.g. server-side watch timeout); reconnect immediately
+	watchFailed                      // establish error, Deleted, or Error event; reconnect only after backoff
+)
 
 // Run drives the watch loop until ctx is cancelled. On any disconnect it
 // re-syncs with a quorum read before re-establishing the watch, so the cache
 // is never trusted across a gap it cannot account for.
+//
+// Reconnects back off exponentially unless the previous watch closed
+// cleanly. Without this, a watch that can never establish — for example
+// RBAC granting get but not watch — would spin Fresh/Watch against the API
+// server with no throttling at all.
 func (c *Cache) Run(ctx context.Context) {
 	backoff := 100 * time.Millisecond
 	const maxBackoff = 5 * time.Second
@@ -104,31 +126,39 @@ func (c *Cache) Run(ctx context.Context) {
 			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
-		backoff = 100 * time.Millisecond
 
-		if !c.watchOnce(ctx, snap.ResourceVersion) {
+		switch c.watchOnce(ctx, snap.ResourceVersion) {
+		case watchStopped:
 			return
+		case watchClosed:
+			backoff = 100 * time.Millisecond
+		case watchFailed:
+			if !sleepCtx(ctx, backoff) {
+				return
+			}
+			backoff = min(backoff*2, maxBackoff)
 		}
 	}
 }
 
-// watchOnce runs a single watch until it closes or errors. It reports false
-// only when ctx is done, so the caller can distinguish shutdown from a
-// reconnect.
-func (c *Cache) watchOnce(ctx context.Context, sinceRV string) bool {
+// watchOnce runs a single watch until it closes, errors, or ctx is done.
+func (c *Cache) watchOnce(ctx context.Context, sinceRV string) watchOutcome {
 	w, err := c.store.Watch(ctx, sinceRV)
 	if err != nil {
-		return ctx.Err() == nil
+		if ctx.Err() != nil {
+			return watchStopped
+		}
+		return watchFailed
 	}
 	defer w.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return watchStopped
 		case ev, ok := <-w.ResultChan():
 			if !ok {
-				return true // channel closed: reconnect via a fresh Get
+				return watchClosed // channel closed: reconnect via a fresh Get
 			}
 			switch ev.Type {
 			case watch.Added, watch.Modified:
@@ -137,9 +167,9 @@ func (c *Cache) watchOnce(ctx context.Context, sinceRV string) bool {
 				}
 			case watch.Deleted:
 				// Keep serving the last snapshot; writes will fail loudly.
-				return true
+				return watchFailed
 			case watch.Error:
-				return true
+				return watchFailed
 			}
 		}
 	}
