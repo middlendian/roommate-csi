@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // TestMountGrantsAtomicOTrunc proves the kernel actually grants
@@ -14,6 +15,10 @@ import (
 // requested it. Requesting ExtraCapabilities is not the same as receiving
 // them — see checkAtomicOTrunc's doc comment for what silently breaks if a
 // kernel ever declines.
+//
+// This mounts directly rather than via mountForTest because it needs the
+// returned *fuse.Server to inspect KernelSettings, and mountForTest doesn't
+// hand that back.
 func TestMountGrantsAtomicOTrunc(t *testing.T) {
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skip("/dev/fuse unavailable; skipping FUSE test")
@@ -33,6 +38,7 @@ func TestMountGrantsAtomicOTrunc(t *testing.T) {
 	vol := &Volume{
 		Cfg: cfg, Store: store, Cache: cache,
 		Committer: NewCommitter(store, cache),
+		client:    fake.NewSimpleClientset(),
 		podUID:    "test-pod-uid",
 	}
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // mountForTest mounts a volume backed by an in-memory store on a temp dir and
@@ -39,6 +40,7 @@ func mountForTest(t *testing.T, data map[string][]byte) (string, *Volume) {
 	vol := &Volume{
 		Cfg: cfg, Store: store, Cache: cache,
 		Committer: NewCommitter(store, cache),
+		client:    fake.NewSimpleClientset(),
 		podUID:    "test-pod-uid",
 	}
 
