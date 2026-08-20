@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: roommate-demo
+  namespace: my-app
+spec:
+  serviceAccountName: session-runner
+  containers:
+    - name: app
+      image: debian:bookworm-slim
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: creds, mountPath: /creds}
+  volumes:
+    - name: creds
+      csi:
+        driver: roommate.csi
+        volumeAttributes:
+          objectKind: Secret
+          objectName: oauth-credentials
