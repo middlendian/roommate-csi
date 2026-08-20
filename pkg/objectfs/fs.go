@@ -66,6 +66,86 @@ func (r *Root) Mkdir(context.Context, string, uint32, *fuse.EntryOut) (*fs.Inode
 	return nil, syscall.ENOTSUP
 }
 
+var (
+	_ fs.NodeCreater   = (*Root)(nil)
+	_ fs.NodeUnlinker  = (*Root)(nil)
+	_ fs.NodeRenamer   = (*Root)(nil)
+	_ fs.NodeSetattrer = (*File)(nil)
+)
+
+// Create adds a new key. The value is empty until the handle's write is
+// committed by flush, fsync, or release.
+func (r *Root) Create(ctx context.Context, name string, _, _ uint32, out *fuse.EntryOut) (
+	*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	if !ValidKey(name) {
+		return nil, nil, 0, syscall.EINVAL
+	}
+	child := &File{vol: r.vol, key: name}
+	h := newHandle(r.vol, name, r.vol.Cache.Current(), nil)
+	h.dirty = true // an empty create must still produce a key
+	fillFileAttr(&out.Attr, r.vol.Cfg, 0)
+	inode := r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG})
+	return inode, h, 0, 0
+}
+
+// Unlink removes the key from the object in a single merge patch.
+func (r *Root) Unlink(ctx context.Context, name string) syscall.Errno {
+	if err := r.vol.Committer.Commit(ctx, nil, nil, []string{name}); err != nil {
+		return errnoFor(err)
+	}
+	return 0
+}
+
+// Rename is a copy-key plus delete-key in one patch, since a key cannot move.
+func (r *Root) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, _ uint32) syscall.Errno {
+	if newParent != fs.InodeEmbedder(r) {
+		return syscall.EXDEV // flat namespace: there is nowhere else to go
+	}
+	if !ValidKey(newName) {
+		return syscall.EINVAL
+	}
+	snap := r.vol.Cache.MaybeFresh(ctx)
+	if snap == nil {
+		return syscall.EIO
+	}
+	value, ok := snap.Get(name)
+	if !ok {
+		return syscall.ENOENT
+	}
+	err := r.vol.Committer.Commit(ctx, nil, map[string][]byte{newName: value}, []string{name})
+	if err != nil {
+		return errnoFor(err)
+	}
+	return 0
+}
+
+// Setattr handles the truncate half of O_TRUNC and refuses everything else.
+// Modes and ownership come from mount attributes and are not stored in the
+// object, so chmod cannot round-trip.
+func (f *File) Setattr(_ context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if _, ok := in.GetMode(); ok {
+		return syscall.EPERM
+	}
+	if _, ok := in.GetUID(); ok {
+		return syscall.EPERM
+	}
+	if _, ok := in.GetGID(); ok {
+		return syscall.EPERM
+	}
+	if size, ok := in.GetSize(); ok {
+		h, ok := fh.(*handle)
+		if !ok {
+			return syscall.EINVAL
+		}
+		h.truncate(size)
+		out.Size = size
+	}
+	out.Mode = fuse.S_IFREG | f.vol.Cfg.FileMode
+	out.Uid = f.vol.Cfg.UID
+	out.Gid = f.vol.Cfg.GID
+	return 0
+}
+
 // fillFileAttr populates attr for a regular file of the given size using
 // cfg's FileMode, UID, and GID.
 func fillFileAttr(attr *fuse.Attr, cfg Config, size int) {
