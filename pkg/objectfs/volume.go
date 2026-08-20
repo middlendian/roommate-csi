@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -155,6 +156,12 @@ type Volume struct {
 	client    kubernetes.Interface
 	holderSeq atomic.Uint64
 	podUID    string
+
+	// acquireMu is shared across every LeaseManager this Volume hands out via
+	// NewLease, so two handles in the same pod can't both observe the
+	// coordination.k8s.io Lease as unclaimed and both win it — see
+	// LeaseManager.local's doc comment for why that window exists at all.
+	acquireMu sync.Mutex
 }
 
 // NewVolume assembles a Volume. client must be authenticated as the
@@ -188,5 +195,7 @@ func (v *Volume) Run(ctx context.Context) { v.Cache.Run(ctx) }
 // processes in the same pod are distinct lock holders.
 func (v *Volume) NewLease() *LeaseManager {
 	holder := fmt.Sprintf("%s:%d", v.podUID, v.holderSeq.Add(1))
-	return NewLeaseManager(v.client, v.Cfg.Namespace, v.Cfg.LeaseName, holder, v.Cfg.LeaseDuration)
+	m := NewLeaseManager(v.client, v.Cfg.Namespace, v.Cfg.LeaseName, holder, v.Cfg.LeaseDuration)
+	m.local = &v.acquireMu
+	return m
 }

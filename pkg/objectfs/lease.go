@@ -34,6 +34,18 @@ type LeaseManager struct {
 	holder   string
 	duration time.Duration
 
+	// local, if set, is shared by every LeaseManager for the same Volume
+	// (wired up by Volume.NewLease) and serialises each one's Get-then-write
+	// attempt in TryAcquire. Two handles in the same pod get distinct holder
+	// identities, so nothing else stops them from both observing the same
+	// Lease as unclaimed and both writing themselves in as holder: a real API
+	// server catches that via a resourceVersion conflict on the loser's
+	// write, but nothing about this type requires the backing store to
+	// enforce that — closing the window locally removes the dependency. Left
+	// nil for a bare NewLeaseManager (as in this package's tests), which
+	// never races itself.
+	local *sync.Mutex
+
 	mu      sync.Mutex
 	held    bool
 	healthy bool
@@ -66,6 +78,11 @@ func (m *LeaseManager) TryAcquire(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	m.mu.Unlock()
+
+	if m.local != nil {
+		m.local.Lock()
+		defer m.local.Unlock()
+	}
 
 	cur, err := m.client.CoordinationV1().Leases(m.ns).Get(ctx, m.name, metav1.GetOptions{})
 	switch {
