@@ -31,8 +31,10 @@ func NewConfigMapStore(c kubernetes.Interface, ns, name string) *ConfigMapStore 
 	return &ConfigMapStore{client: c, ns: ns, name: name}
 }
 
+// Describe returns a human-readable descriptor of the ConfigMap, e.g. "configmaps/config".
 func (s *ConfigMapStore) Describe() string { return "configmaps/" + s.name }
 
+// Get performs a quorum read from etcd by using empty GetOptions, ensuring the read-after-write guarantee.
 func (s *ConfigMapStore) Get(ctx context.Context) (*Snapshot, error) {
 	// Empty GetOptions == quorum read. Do not set ResourceVersion.
 	obj, err := s.client.CoreV1().ConfigMaps(s.ns).Get(ctx, s.name, metav1.GetOptions{})
@@ -42,6 +44,7 @@ func (s *ConfigMapStore) Get(ctx context.Context) (*Snapshot, error) {
 	return s.Decode(obj)
 }
 
+// Watch starts a watch on the ConfigMap scoped by metadata.name field selector, satisfying RBAC resourceNames constraints.
 func (s *ConfigMapStore) Watch(ctx context.Context, sinceRV string) (watch.Interface, error) {
 	return s.client.CoreV1().ConfigMaps(s.ns).Watch(ctx, metav1.ListOptions{
 		FieldSelector:   fields.OneTermEqualSelector("metadata.name", s.name).String(),
@@ -49,6 +52,7 @@ func (s *ConfigMapStore) Watch(ctx context.Context, sinceRV string) (watch.Inter
 	})
 }
 
+// Decode extracts the data and binaryData maps from a ConfigMap object into a Snapshot with properly copied byte slices.
 func (s *ConfigMapStore) Decode(obj runtime.Object) (*Snapshot, error) {
 	cm, ok := obj.(*corev1.ConfigMap)
 	if !ok {
@@ -70,6 +74,7 @@ func (s *ConfigMapStore) Decode(obj runtime.Object) (*Snapshot, error) {
 	}, nil
 }
 
+// Patch applies a merge patch to the ConfigMap's data and binaryData maps, setting and deleting keys as specified.
 func (s *ConfigMapStore) Patch(ctx context.Context, set map[string][]byte, del []string) error {
 	// The API server rejects a key present in both maps, so every write nulls
 	// the half it is not using. A deletion nulls both, since the caller does

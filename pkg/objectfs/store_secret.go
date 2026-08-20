@@ -28,8 +28,10 @@ func NewSecretStore(c kubernetes.Interface, ns, name string) *SecretStore {
 	return &SecretStore{client: c, ns: ns, name: name}
 }
 
+// Describe returns a human-readable descriptor of the Secret, e.g. "secrets/oauth-credentials".
 func (s *SecretStore) Describe() string { return "secrets/" + s.name }
 
+// Get performs a quorum read from etcd by using empty GetOptions, ensuring the read-after-write guarantee.
 func (s *SecretStore) Get(ctx context.Context) (*Snapshot, error) {
 	// Empty GetOptions == quorum read. Do not set ResourceVersion.
 	obj, err := s.client.CoreV1().Secrets(s.ns).Get(ctx, s.name, metav1.GetOptions{})
@@ -39,6 +41,7 @@ func (s *SecretStore) Get(ctx context.Context) (*Snapshot, error) {
 	return s.Decode(obj)
 }
 
+// Watch starts a watch on the Secret scoped by metadata.name field selector, satisfying RBAC resourceNames constraints.
 func (s *SecretStore) Watch(ctx context.Context, sinceRV string) (watch.Interface, error) {
 	return s.client.CoreV1().Secrets(s.ns).Watch(ctx, metav1.ListOptions{
 		FieldSelector:   fields.OneTermEqualSelector("metadata.name", s.name).String(),
@@ -46,6 +49,7 @@ func (s *SecretStore) Watch(ctx context.Context, sinceRV string) (watch.Interfac
 	})
 }
 
+// Decode extracts the data map from a Secret object into a Snapshot with deep-copied byte slices.
 func (s *SecretStore) Decode(obj runtime.Object) (*Snapshot, error) {
 	sec, ok := obj.(*corev1.Secret)
 	if !ok {
@@ -64,6 +68,7 @@ func (s *SecretStore) Decode(obj runtime.Object) (*Snapshot, error) {
 	}, nil
 }
 
+// Patch applies a merge patch to the Secret's data map, setting and deleting keys as specified.
 func (s *SecretStore) Patch(ctx context.Context, set map[string][]byte, del []string) error {
 	// json.Marshal base64-encodes []byte, which is exactly the wire form the
 	// API server expects for Secret.data. A nil entry deletes the key.
