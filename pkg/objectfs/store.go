@@ -36,3 +36,8 @@ type Store interface {
 	// `secrets/oauth-credentials`.
 	Describe() string
 }
+
+var (
+	_ Store = (*SecretStore)(nil)
+	_ Store = (*ConfigMapStore)(nil)
+)
