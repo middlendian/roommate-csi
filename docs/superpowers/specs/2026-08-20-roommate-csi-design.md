@@ -573,12 +573,10 @@ is called out below as an open question.
 
 Stated in the README, not discovered later:
 
-- **`inotify` does not fire on remote changes.** The kernel generates
-  inotify events for FUSE only from local VFS activity; a change the FUSE
-  server learns about via watch produces nothing for a userspace watcher.
-  go-fuse's `EntryNotify`/`InodeNotify` invalidate kernel caches but do not
-  synthesize events. Programs that detect rotation by watching for kubelet's
-  `..data` symlink flip will not work. Programs that re-read on `401` will.
+- **`inotify` does not fire on remote changes — in v1.** Programs that
+  detect rotation by watching for kubelet's `..data` symlink flip will not
+  work. Programs that re-read on `401` will. This is a deferred limitation
+  rather than a permanent one; see *inotify* below.
 - **Read-after-write only under the lock.** Unlocked readers get eventual
   consistency bounded by watch propagation.
 - **No backstop for unlocked writers.** They silently win.
@@ -587,6 +585,59 @@ Stated in the README, not discovered later:
 - **Flat namespace.** No subdirectories.
 - **`chmod` returns `EPERM`.** Modes come from mount attributes.
 - **Open descriptors break across a node-plugin restart.**
+
+## inotify
+
+Deferred from v1, but researched enough to record that it is achievable.
+
+`fsnotify` is a **VFS-layer** mechanism: events are emitted from local
+syscall paths as the kernel executes an operation. A change that only the
+FUSE server knows about never traverses the VFS, so nothing emits. libfuse's
+own wiki states it directly — *"Fsnotify does not work right now with FUSE
+based filesystems and network filesystems."* This is the same reason inotify
+has never worked for remote changes on NFS or SMB.
+
+There is an irony worth stating: the property that lets this driver
+intercept writes and `flock` — being a userspace filesystem — is exactly
+what costs it inotify. A driver that merely projected files onto tmpfs and
+flipped a symlink would get inotify for free and could do none of what this
+project exists to do.
+
+**Kernel support is not coming soon.** A 2021 RFC series added general
+fsnotify support to FUSE (`FUSE_NOTIFY_FSNOTIFY` plus a `fuse_fsnotify_event`
+inode operation), motivated by virtiofs. There is no evidence it landed, and
+virtiofs still documents inotify as unsupported. Do not design around it.
+
+Two routes work today, without kernel changes:
+
+**Route A — `NotifyDelete`.** Exactly one FUSE notification reaches inotify
+watchers. Per libfuse, `fuse_lowlevel_notify_delete` will, *"if there are any
+inotify watches registered for the dentry,"* inform the watchers *"that the
+dentry has been deleted."* go-fuse exposes this as `NotifyDelete` —
+explicitly *"equivalent to NotifyEntry, but also sends an event to inotify
+watchers."* Its sibling `EntryNotify` does **not**.
+
+Firing `NotifyDelete` at changed entries delivers a *delete*, not a
+*modify*. That satisfies the common Go `fsnotify` reloader idiom — watch a
+file, on `REMOVE`/`RENAME` re-add the watch and re-read — and does nothing
+for a consumer waiting on `IN_MODIFY` or `IN_CLOSE_WRITE`. Small, roughly
+twenty lines.
+
+**Route B — drive the VFS deliberately.** Emulate kubelet's layout: carry a
+real `..data` entry, and on a remote change have the server perform an
+actual `rename()` **through its own mount path**, from a goroutine that is
+not servicing a request. The kernel then emits `IN_MOVED_FROM` /
+`IN_MOVED_TO` naturally, because a real VFS operation really happened —
+indistinguishable from kubelet's flip. Anything that watches a projected
+Secret today would work unmodified.
+
+The hazard is classic FUSE self-deadlock: a server performing I/O on its own
+filesystem. Both libfuse and go-fuse warn about it explicitly (*"You should
+not hold any FUSE filesystem locks, as that can lead to deadlock"*). Real,
+but well understood, and confined to one goroutine under a documented rule.
+
+Route B is the one that delivers genuine parity and is the recommended path
+if this is ever needed.
 
 ## Open questions
 
