@@ -34,8 +34,11 @@ type handle struct {
 	// dirty reports whether buf holds writes not yet committed to the store.
 	dirty bool
 
-	// lease is the Lease this handle holds, if any. Set by the lock path
-	// (Task 13); Release must commit before releasing it.
+	// lease is the Lease this handle holds, if any. Set by setlk, cleared by
+	// unlock and Release. Always accessed under mu — setlk assigns it from
+	// the FUSE server's own goroutine, which can run concurrently with
+	// Read/Write/commit on the same handle (dup'd fds, or a second thread
+	// racing the lock call against an in-flight I/O).
 	lease *LeaseManager
 }
 
@@ -135,9 +138,14 @@ func (h *handle) Fsync(ctx context.Context, _ uint32) syscall.Errno {
 // this driver exists to close.
 func (h *handle) Release(ctx context.Context) syscall.Errno {
 	errno := h.commit(ctx)
-	if h.lease != nil {
-		_ = h.lease.Release(ctx)
-		h.lease = nil
+
+	h.mu.Lock()
+	lease := h.lease
+	h.lease = nil
+	h.mu.Unlock()
+
+	if lease != nil {
+		_ = lease.Release(ctx)
 	}
 	return errno
 }
@@ -164,6 +172,115 @@ func (h *handle) commit(ctx context.Context) syscall.Errno {
 	h.dirty = false
 	h.mu.Unlock()
 	return 0
+}
+
+var (
+	_ fs.FileSetlker  = (*handle)(nil)
+	_ fs.FileSetlkwer = (*handle)(nil)
+)
+
+// Setlk is the non-blocking lock path: flock(LOCK_NB).
+func (h *handle) Setlk(ctx context.Context, _ uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	return h.setlk(ctx, lk, flags, false)
+}
+
+// Setlkw is the blocking lock path.
+//
+// It blocks indefinitely rather than timing out, matching local filesystem
+// semantics — an open file keeps its lock for as long as it wants. The
+// kernel's FUSE interrupt path cancels ctx when the waiting process is
+// signalled, so a signal still breaks the wait.
+func (h *handle) Setlkw(ctx context.Context, _ uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	return h.setlk(ctx, lk, flags, true)
+}
+
+// setlk maps a flock(2) request onto this handle's Lease.
+//
+// Byte-range POSIX locks (fcntl F_SETLK/F_SETLKW without FUSE_LK_FLOCK) are
+// not supported — flags carries FUSE_LK_FLOCK only for whole-file flock(2),
+// which is the only lock mode this driver exists to serve.
+//
+// F_RDLCK (LOCK_SH) is mapped to the same exclusive Lease as F_WRLCK
+// (LOCK_EX): over-strict, deliberately. A caller taking a shared lock is
+// asking for "no writer is mid-write", and only the Lease — a single
+// exclusive holder — can promise that.
+func (h *handle) setlk(ctx context.Context, lk *fuse.FileLock, flags uint32, blocking bool) syscall.Errno {
+	if flags&fuse.FUSE_LK_FLOCK == 0 {
+		return syscall.ENOTSUP
+	}
+
+	if lk.Typ == syscall.F_UNLCK {
+		return h.unlock(ctx)
+	}
+
+	h.mu.Lock()
+	if h.lease != nil {
+		h.mu.Unlock()
+		return 0 // this handle already holds it
+	}
+	h.mu.Unlock()
+
+	lease := h.vol.NewLease()
+	if blocking {
+		if err := lease.Acquire(ctx); err != nil {
+			return syscall.EINTR
+		}
+	} else {
+		ok, err := lease.TryAcquire(ctx)
+		if err != nil {
+			return errnoFor(err)
+		}
+		if !ok {
+			return syscall.EWOULDBLOCK
+		}
+	}
+
+	// The mandatory quorum read: this is the entire read-after-write
+	// guarantee. It is what lets a consumer holding the lock ask "did
+	// someone already refresh?" and get a truthful answer, rather than a
+	// possibly-stale cached view that predates the write the lock was meant
+	// to serialise against.
+	if _, err := h.vol.Cache.Fresh(ctx); err != nil {
+		_ = lease.Release(ctx)
+		return errnoFor(err)
+	}
+
+	h.mu.Lock()
+	h.lease = lease
+	// Re-pin to the freshly read snapshot, unless this handle already has
+	// uncommitted writes of its own — those must win over whatever the
+	// quorum read just observed. snap.Get returns a fresh copy, so this
+	// swaps in a new backing array rather than mutating buf's existing one,
+	// preserving the copy-on-write discipline an in-flight Read depends on.
+	if h.dirty {
+		h.mu.Unlock()
+		return 0
+	}
+	if snap := h.vol.Cache.Current(); snap != nil {
+		h.snap = snap
+		if value, ok := snap.Get(h.key); ok {
+			h.buf = value
+		}
+	}
+	h.mu.Unlock()
+	return 0
+}
+
+// unlock commits before releasing the Lease, so the next holder's mandatory
+// fresh read can observe this holder's write. Releasing first would
+// reintroduce the exact race this driver exists to close.
+func (h *handle) unlock(ctx context.Context) syscall.Errno {
+	errno := h.commit(ctx)
+
+	h.mu.Lock()
+	lease := h.lease
+	h.lease = nil
+	h.mu.Unlock()
+
+	if lease != nil {
+		_ = lease.Release(ctx)
+	}
+	return errno
 }
 
 // errnoFor maps a commit failure to the closest filesystem error, so a

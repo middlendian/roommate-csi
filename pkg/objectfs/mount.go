@@ -1,6 +1,8 @@
 package objectfs
 
 import (
+	"log"
+
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -29,7 +31,7 @@ import (
 // committing immediately is correct because there is no handle at all.
 func Mount(dir string, v *Volume) (*fuse.Server, error) {
 	root := &Root{vol: v}
-	return fs.Mount(dir, root, &fs.Options{
+	srv, err := fs.Mount(dir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			AllowOther:        true,
 			FsName:            v.Cfg.ObjectName,
@@ -38,4 +40,27 @@ func Mount(dir string, v *Volume) (*fuse.Server, error) {
 			ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+	checkAtomicOTrunc(srv)
+	return srv, nil
+}
+
+// checkAtomicOTrunc logs loudly if the kernel did not grant
+// FUSE_CAP_ATOMIC_O_TRUNC despite it being requested.
+//
+// Requesting the capability is not the same as receiving it: an older kernel
+// (or one where the feature was disabled) silently declines it, and the VFS
+// falls back to sending a pre-open SETATTR(size=0) with no file handle
+// attached. That is exactly the fh-less truncate path File.Setattr commits
+// immediately — so a decline silently reopens the data-loss window
+// ExtraCapabilities was set to close, with no error surfaced anywhere else.
+func checkAtomicOTrunc(srv *fuse.Server) {
+	settings := srv.KernelSettings()
+	if settings.Flags64()&fuse.CAP_ATOMIC_O_TRUNC == 0 {
+		log.Printf("roommate: WARNING: kernel did not grant FUSE_CAP_ATOMIC_O_TRUNC; " +
+			"O_TRUNC opens will fall back to a pre-open SETATTR(size=0), " +
+			"reopening the truncate-then-write data-loss window")
+	}
 }
