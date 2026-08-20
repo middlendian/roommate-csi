@@ -122,7 +122,14 @@ func (r *Root) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 // Setattr handles the truncate half of O_TRUNC and refuses everything else.
 // Modes and ownership come from mount attributes and are not stored in the
 // object, so chmod cannot round-trip.
-func (f *File) Setattr(_ context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+//
+// go-fuse never negotiates FUSE_CAP_ATOMIC_O_TRUNC (see doInit in its fuse
+// package), so the kernel does not fold O_TRUNC into the OPEN request; for
+// an existing file it sends a separate SETATTR(size=0) *before* OPEN, with
+// no file handle attached yet. fh is only a *handle once Open has run, so
+// that pre-open truncate falls to truncateCommitted, which commits directly
+// since there is no handle to buffer it into.
+func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	if _, ok := in.GetMode(); ok {
 		return syscall.EPERM
 	}
@@ -133,16 +140,39 @@ func (f *File) Setattr(_ context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, 
 		return syscall.EPERM
 	}
 	if size, ok := in.GetSize(); ok {
-		h, ok := fh.(*handle)
-		if !ok {
-			return syscall.EINVAL
+		if h, ok := fh.(*handle); ok {
+			h.truncate(size)
+		} else if errno := f.truncateCommitted(ctx, size); errno != 0 {
+			return errno
 		}
-		h.truncate(size)
 		out.Size = size
 	}
 	out.Mode = fuse.S_IFREG | f.vol.Cfg.FileMode
 	out.Uid = f.vol.Cfg.UID
 	out.Gid = f.vol.Cfg.GID
+	return 0
+}
+
+// truncateCommitted resizes the key's current value and commits immediately.
+// Used only when Setattr has no open handle to buffer the change into (see
+// Setattr's doc comment).
+func (f *File) truncateCommitted(ctx context.Context, size uint64) syscall.Errno {
+	snap := f.vol.Cache.MaybeFresh(ctx)
+	if snap == nil {
+		return syscall.EIO
+	}
+	value, _ := snap.Get(f.key)
+	switch {
+	case uint64(len(value)) > size:
+		value = value[:size]
+	case uint64(len(value)) < size:
+		grown := make([]byte, size)
+		copy(grown, value)
+		value = grown
+	}
+	if err := f.vol.Committer.Commit(ctx, nil, map[string][]byte{f.key: value}, nil); err != nil {
+		return errnoFor(err)
+	}
 	return 0
 }
 
