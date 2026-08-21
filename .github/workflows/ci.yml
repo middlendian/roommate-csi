@@ -26,6 +26,10 @@ jobs:
         run: make fmt-check vet tidy-check cover
       - name: go build ./...
         run: go build ./...
+      - name: api semantics (envtest)
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          make envtest
 
   image:
     runs-on: ubuntu-latest

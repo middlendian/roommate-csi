@@ -2,7 +2,7 @@ BIN     := bin
 PKGS    := ./...
 GOFILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
-.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker
+.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker envtest
 
 build:
 	go build -o $(BIN)/roommate-node ./cmd/node
@@ -44,6 +44,12 @@ check: fmt-check vet lint tidy-check cover build
 
 clean:
 	rm -rf $(BIN) cover.out
+
+ENVTEST_K8S_VERSION ?= 1.31.0
+
+envtest:
+	KUBEBUILDER_ASSETS="$$(setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
+	go test -tags=envtest ./test/apisemantics/... -v
 
 IMAGE   ?= ghcr.io/middlendian/roommate-csi
 TAG     ?= dev
