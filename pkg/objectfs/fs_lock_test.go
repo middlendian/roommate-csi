@@ -304,13 +304,14 @@ func TestFlockRepinDropsDeletedKey(t *testing.T) {
 // would only ever see the errno this package returns, not what the kernel
 // does with it.
 func TestFlockBlockingSurfacesRealErrorsAsIO(t *testing.T) {
-	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
-	path := filepath.Join(dir, "session.key")
-
-	fc := vol.client.(*fake.Clientset)
+	// The reactor must be installed before Mount spawns the FUSE server's
+	// request-handling goroutine — see mountForTestWithClient's doc comment.
+	fc := fake.NewSimpleClientset()
 	fc.PrependReactor("get", "leases", func(ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("injected: transient API failure")
 	})
+	dir, _ := mountForTestWithClient(t, map[string][]byte{"session.key": []byte("v1")}, fc)
+	path := filepath.Join(dir, "session.key")
 
 	f, err := os.Open(path)
 	if err != nil {

@@ -4699,7 +4699,10 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: [%q]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -5438,7 +5441,10 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: ["roommate-oauth-credentials"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -5960,7 +5966,12 @@ func setupNamespace(t *testing.T, c kubernetes.Interface, ns string, data map[st
 					APIGroups:     []string{"coordination.k8s.io"},
 					Resources:     []string{"leases"},
 					ResourceNames: []string{"roommate-oauth-credentials"},
-					Verbs:         []string{"get", "create", "update"},
+					Verbs:         []string{"get", "update"},
+				},
+				{
+					APIGroups: []string{"coordination.k8s.io"},
+					Resources: []string{"leases"},
+					Verbs:     []string{"create"},
 				},
 			},
 		}, metav1.CreateOptions{})

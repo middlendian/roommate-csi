@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -21,6 +22,23 @@ import (
 // the store during a test, so a test that wants to prove pinning survives a
 // "remote change" must land that change in the Cache itself.
 func mountForTest(t *testing.T, data map[string][]byte) (string, *Volume) {
+	t.Helper()
+	return mountForTestWithClient(t, data, fake.NewSimpleClientset())
+}
+
+// mountForTestWithClient is mountForTest but with the fake Kubernetes client
+// supplied by the caller instead of built fresh, so a test can install a
+// reactor on it — e.g. to inject a Lease API failure — before Mount spawns
+// the FUSE server's request-handling goroutine.
+//
+// This distinction matters under -race: PrependReactor on a client that a
+// live FUSE mount's request goroutine might already be reading from races
+// even when real-world ordering is safe, because that ordering is enforced
+// by a blocking syscall through the kernel (flock(2) round-tripping through
+// /dev/fuse), which establishes no happens-before edge the race detector can
+// see. Configuring the reactor before Mount ties it to the goroutine's
+// creation instead, which the race detector does recognize.
+func mountForTestWithClient(t *testing.T, data map[string][]byte, client kubernetes.Interface) (string, *Volume) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skip("/dev/fuse unavailable; skipping FUSE test")
@@ -40,7 +58,7 @@ func mountForTest(t *testing.T, data map[string][]byte) (string, *Volume) {
 	vol := &Volume{
 		Cfg: cfg, Store: store, Cache: cache,
 		Committer: NewCommitter(store, cache),
-		client:    fake.NewSimpleClientset(),
+		client:    client,
 		podUID:    "test-pod-uid",
 	}
 

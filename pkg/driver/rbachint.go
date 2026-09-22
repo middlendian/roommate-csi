@@ -35,7 +35,10 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: [%q]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

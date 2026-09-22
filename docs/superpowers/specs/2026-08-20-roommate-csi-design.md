@@ -187,7 +187,13 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: ["roommate-oauth-credentials"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  # RBAC cannot scope "create" by resourceNames — the object's name isn't
+  # known at authorization time, so a resourceNames-restricted create rule
+  # silently denies every create. This has to be its own, unscoped rule.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
 ```
 
 `patch` rather than `update` is deliberate — it is the narrower grant, and

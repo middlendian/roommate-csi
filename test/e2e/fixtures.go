@@ -71,7 +71,16 @@ func setupNamespace(t *testing.T, c kubernetes.Interface, ns string, data map[st
 					APIGroups:     []string{"coordination.k8s.io"},
 					Resources:     []string{"leases"},
 					ResourceNames: []string{"roommate-oauth-credentials"},
-					Verbs:         []string{"get", "create", "update"},
+					Verbs:         []string{"get", "update"},
+				},
+				// RBAC cannot scope "create" by resourceNames (the object's
+				// name isn't known at authorization time), so a
+				// resourceNames-restricted create rule silently denies
+				// every create — this must be a separate, unscoped rule.
+				{
+					APIGroups: []string{"coordination.k8s.io"},
+					Resources: []string{"leases"},
+					Verbs:     []string{"create"},
 				},
 			},
 		}, metav1.CreateOptions{})
