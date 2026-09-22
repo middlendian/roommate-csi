@@ -1,5 +1,10 @@
 //go:build e2e
 
+// Package e2e drives the CSI driver through a real kubelet against a kind
+// cluster: it creates namespaces, RBAC, Secrets, and Pods with inline CSI
+// volumes, and asserts on Pod phase, Kubernetes events, and Secret contents.
+// It is excluded from `go test ./...` by the e2e build tag; run it via
+// `make e2e` / `make e2e-nfs`, which boot the cluster first.
 package e2e
 
 import (
