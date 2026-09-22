@@ -50,6 +50,58 @@ func TestRBACHintLeaseCreateIsNotNameScoped(t *testing.T) {
 	}
 }
 
+// TestRBACHintBindingNameIncludesServiceAccount is I7's regression guard.
+// Before the fix, the RoleBinding was named just "roommate-<objectName>",
+// with no ServiceAccount component. Two ServiceAccounts mounting the same
+// Secret/ConfigMap would each be told to apply a binding with that same
+// name — and applying a RoleBinding replaces its subjects list wholesale
+// rather than merging, so the second apply silently drops the first
+// ServiceAccount's subject. Its next API call 403s, its watch dies, and it
+// degrades to a frozen cache with EACCES writes, with nothing pointing at
+// the cause.
+func TestRBACHintBindingNameIncludesServiceAccount(t *testing.T) {
+	gotA := RBACHint("my-app", "service-a", "Secret", "oauth-credentials", "roommate-oauth-credentials")
+	gotB := RBACHint("my-app", "service-b", "Secret", "oauth-credentials", "roommate-oauth-credentials")
+
+	if !strings.Contains(gotA, "name: roommate-oauth-credentials-service-a") {
+		t.Errorf("hint for service-a does not name a per-ServiceAccount binding:\n%s", gotA)
+	}
+	if !strings.Contains(gotB, "name: roommate-oauth-credentials-service-b") {
+		t.Errorf("hint for service-b does not name a per-ServiceAccount binding:\n%s", gotB)
+	}
+
+	// The two ServiceAccounts' hints must not tell them to apply a
+	// RoleBinding under the exact same name — that is precisely the
+	// collision this fix closes.
+	bindingName := func(hint string) string {
+		i := strings.Index(hint, "kind: RoleBinding")
+		if i < 0 {
+			t.Fatalf("hint has no RoleBinding:\n%s", hint)
+		}
+		rest := hint[i:]
+		j := strings.Index(rest, "name: ")
+		if j < 0 {
+			t.Fatalf("RoleBinding has no name:\n%s", hint)
+		}
+		rest = rest[j+len("name: "):]
+		if k := strings.IndexAny(rest, "\r\n"); k >= 0 {
+			rest = rest[:k]
+		}
+		return rest
+	}
+	if bindingName(gotA) == bindingName(gotB) {
+		t.Fatalf("service-a and service-b are told to apply the same RoleBinding name %q — "+
+			"applying the second would silently replace the first's subject", bindingName(gotA))
+	}
+
+	// The Role — shared per-object, not per-ServiceAccount — is unaffected:
+	// re-applying identical rules is idempotent and loses nothing, unlike a
+	// RoleBinding's subjects list.
+	if !strings.Contains(gotA, "name: roommate-oauth-credentials\n") {
+		t.Errorf("Role name changed unexpectedly:\n%s", gotA)
+	}
+}
+
 func TestRBACHintUsesConfigMapsForConfigMapKind(t *testing.T) {
 	got := RBACHint("my-app", "session-runner", "ConfigMap", "app-config", "roommate-app-config")
 	if !strings.Contains(got, "configmaps") {
