@@ -1,6 +1,7 @@
 package objectfs
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -330,5 +332,49 @@ func TestFlockBlockingSurfacesRealErrorsAsIO(t *testing.T) {
 	}
 	if err != syscall.EIO {
 		t.Fatalf("Flock err = %v, want EIO", err)
+	}
+}
+
+// TestSetlkBlockingReturnsEINTROnlyWhenCtxCancelled guards the other half of
+// the split fixed alongside TestFlockBlockingSurfacesRealErrorsAsIO: real
+// ctx cancellation — the kernel's FUSE_INTERRUPT — must still map to EINTR,
+// not fall through to errnoFor. An inverted or dropped condition here would
+// silently break the interrupt contract with nothing else to catch it.
+//
+// This calls setlk directly instead of driving a real blocking flock(2):
+// reproducing a genuine kernel-delivered FUSE_INTERRUPT deterministically
+// would mean racing a real OS signal against a syscall already blocked
+// inside the kernel, which is exactly the kind of timing-dependent setup
+// this package's tests avoid elsewhere (see synctest's use in
+// concurrent_publish_test.go). Pre-cancelling ctx and forcing Acquire's
+// retry loop to observe it via sleepCtx exercises the identical code path
+// — lease.Acquire failing because ctx is Done — without that flakiness.
+func TestSetlkBlockingReturnsEINTROnlyWhenCtxCancelled(t *testing.T) {
+	store := newStubStore(map[string][]byte{"session.key": []byte("v1")})
+	cache := NewCache(store, time.Hour)
+	if _, err := cache.Fresh(context.Background()); err != nil {
+		t.Fatalf("warm cache: %v", err)
+	}
+
+	// A Lease already held by someone else and not yet expired: TryAcquire
+	// reports not-ok without error, so Acquire's retry loop reaches
+	// sleepCtx — the same wait a real interrupt would cut short.
+	held := liveLease("other-holder", testLeaseDur, time.Now())
+	vol := &Volume{
+		Cfg: Config{
+			Namespace: "my-app", ObjectKind: KindSecret, ObjectName: "oauth-credentials",
+			LeaseName: "roommate-oauth-credentials", LeaseDuration: testLeaseDur,
+		},
+		Store: store, Cache: cache, Committer: NewCommitter(store, cache),
+		client: fake.NewSimpleClientset(held), podUID: "test-pod-uid",
+	}
+	h := newHandle(vol, "session.key", cache.Current(), []byte("v1"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stands in for the kernel's FUSE_INTERRUPT arriving mid-wait
+
+	errno := h.setlk(ctx, &fuse.FileLock{Typ: syscall.F_WRLCK}, fuse.FUSE_LK_FLOCK, true)
+	if errno != syscall.EINTR {
+		t.Fatalf("setlk = %v, want EINTR for a cancelled ctx", errno)
 	}
 }
