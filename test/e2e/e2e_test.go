@@ -9,11 +9,13 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -192,6 +194,145 @@ flock /creds/session.key -c '
 		t.Fatalf("session.key = %q, want %q — %s's own marker says it won the race",
 			sec.Data["session.key"], want, winners[0])
 	}
+}
+
+// TestNodePluginRestartRecoversMount is C3's regression guard: spec:664
+// names node-plugin restart recovery as a required e2e scenario, and it was
+// missing — the restart test "would very likely have caught C3"
+// (final-review-findings.md).
+//
+// It force-kills (GracePeriodSeconds: 0) the roommate-node pod on the node a
+// long-lived consumer pod is scheduled on, deliberately bypassing the
+// graceful SIGTERM shutdown path entirely: the assertion below rests on
+// publish()'s DetachStale fix (a hard crash, the case Shutdown cannot help
+// with), not on Registry.Shutdown's best-effort unmount. It then proves the
+// mount actually recovers — a write through the survivor's still-open mount
+// reaches the object via the replacement driver process — and that the pod
+// deletes cleanly afterward rather than sticking in Terminating on a mount
+// kubelet can never clean up.
+func TestNodePluginRestartRecoversMount(t *testing.T) {
+	c := mustClient(t)
+	ns := "e2e-restart"
+	setupNamespace(t, c, ns, map[string][]byte{"session.key": []byte("v1")})
+
+	pod := podSpec("survivor", ns, "", `
+set -e
+test "$(cat /creds/session.key)" = v1
+printf '' > /creds/ready
+for i in $(seq 1 180); do
+  [ -f /creds/proceed ] && break
+  sleep 1
+done
+printf v2 > /creds/session.key
+test "$(cat /creds/session.key)" = v2
+`)
+	if _, err := c.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	waitForPhase(t, c, ns, "survivor", corev1.PodRunning, 3*time.Minute)
+	waitForSecretKeys(t, c, ns, []string{"ready"}, 3*time.Minute)
+
+	survivor, err := c.CoreV1().Pods(ns).Get(context.Background(), "survivor", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get survivor pod: %v", err)
+	}
+	node := survivor.Spec.NodeName
+
+	driverPod := driverPodOnNode(t, c, node)
+
+	grace := int64(0)
+	if err := c.CoreV1().Pods("roommate-system").Delete(context.Background(), driverPod.Name,
+		metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil {
+		t.Fatalf("force-delete driver pod %s: %v", driverPod.Name, err)
+	}
+
+	// Wait for the DaemonSet to replace it with a new, running pod on the
+	// same node.
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		replacement := driverPodOnNodeOrNil(t, c, node)
+		if replacement != nil && replacement.UID != driverPod.UID && replacement.Status.Phase == corev1.PodRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("DaemonSet never replaced the killed driver pod with a running one")
+		}
+		time.Sleep(time.Second)
+	}
+
+	// Release the barrier: the survivor's write must land through the NEW
+	// driver process's remounted FUSE server.
+	sec, err := c.CoreV1().Secrets(ns).Get(context.Background(), "oauth-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if sec.Data == nil {
+		sec.Data = map[string][]byte{}
+	}
+	sec.Data["proceed"] = []byte("go")
+	if _, err := c.CoreV1().Secrets(ns).Update(context.Background(), sec, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("release barrier: %v", err)
+	}
+
+	waitForPhase(t, c, ns, "survivor", corev1.PodSucceeded, 3*time.Minute)
+
+	sec, err = c.CoreV1().Secrets(ns).Get(context.Background(), "oauth-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(sec.Data["session.key"]) != "v2" {
+		t.Fatalf("session.key = %q, want v2 — the mount did not recover after the node-plugin restart",
+			sec.Data["session.key"])
+	}
+
+	// The pod must also delete cleanly afterward: Registry.Delete's
+	// stale-mount detach must not leave it stuck in Terminating.
+	if err := c.CoreV1().Pods(ns).Delete(context.Background(), "survivor", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete survivor pod: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Minute)
+	for {
+		_, err := c.CoreV1().Pods(ns).Get(context.Background(), "survivor", metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("survivor pod stuck after delete — the mount left behind by the restart did not clean up")
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// driverPodOnNode returns the roommate-node DaemonSet pod scheduled on node,
+// failing the test if there isn't exactly one.
+func driverPodOnNode(t *testing.T, c kubernetes.Interface, node string) *corev1.Pod {
+	t.Helper()
+	pods, err := c.CoreV1().Pods("roommate-system").List(context.Background(), metav1.ListOptions{
+		LabelSelector: "app=roommate-node",
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", node),
+	})
+	if err != nil {
+		t.Fatalf("list driver pods on %s: %v", node, err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("driver pods on %s = %d, want exactly 1", node, len(pods.Items))
+	}
+	return &pods.Items[0]
+}
+
+// driverPodOnNodeOrNil is driverPodOnNode without failing the test, for use
+// inside a polling loop where "not there yet" is an expected transient state.
+func driverPodOnNodeOrNil(t *testing.T, c kubernetes.Interface, node string) *corev1.Pod {
+	t.Helper()
+	pods, err := c.CoreV1().Pods("roommate-system").List(context.Background(), metav1.ListOptions{
+		LabelSelector: "app=roommate-node",
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", node),
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return nil
+	}
+	return &pods.Items[0]
 }
 
 func patchStarter(t *testing.T, c kubernetes.Interface, ns string) {

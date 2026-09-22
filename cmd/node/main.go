@@ -5,9 +5,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/middlendian/roommate-csi/pkg/driver"
 	"github.com/middlendian/roommate-csi/pkg/mounts"
@@ -45,14 +48,33 @@ func main() {
 
 	// Mounts are not restored here. Any target that was published before a
 	// restart is rebuilt by the next republish, which arrives within about
-	// 100ms because the CSIDriver sets requiresRepublish.
-	err = driver.Serve(*endpoint,
-		driver.NewIdentityServer(*driverName, version),
-		driver.NewNodeServer(*nodeID, registry, log),
-	)
-	if err != nil {
-		log.Error("serve", "err", err)
-		os.Exit(1)
+	// 100ms because the CSIDriver sets requiresRepublish. DetachStale inside
+	// publish() is what makes that remount succeed even on a hard SIGKILL;
+	// the signal handling below is the graceful half — on an ordinary
+	// rollout restart (SIGTERM, not a crash), force-unmount every live
+	// target on the way out so the ENOTCONN window every consuming pod would
+	// otherwise sit in until the next process's first republish is as short
+	// as possible.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- driver.Serve(*endpoint,
+			driver.NewIdentityServer(*driverName, version),
+			driver.NewNodeServer(*nodeID, registry, log),
+		)
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			log.Error("serve", "err", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		log.Info("received shutdown signal; force-unmounting live targets")
+		registry.Shutdown(log)
 	}
 }
 

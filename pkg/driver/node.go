@@ -204,6 +204,16 @@ func (n *NodeServer) publish(ctx context.Context, target string, vc map[string]s
 		}
 	}
 
+	// A plugin restart leaves target as a mount whose FUSE server is gone —
+	// the previous process's death aborted the /dev/fuse connection but
+	// never ran umount(2), so every operation on target (including the
+	// upcoming MkdirAll's Stat) returns ENOTCONN until something detaches
+	// it. Harmless — a no-op — on a genuine first publish, where target
+	// isn't a mountpoint at all.
+	if err := mounts.DetachStale(target); err != nil {
+		return status.Errorf(codes.Internal, "detach stale mount: %v", err)
+	}
+
 	if err := os.MkdirAll(target, os.FileMode(cfg.DirMode)); err != nil {
 		return status.Errorf(codes.Internal, "mkdir target: %v", err)
 	}
