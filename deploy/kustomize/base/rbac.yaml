@@ -1,0 +1,14 @@
+# The driver's ServiceAccount holds NO Kubernetes API permissions.
+#
+# Every call to read, watch, patch or lock is authenticated as the consuming
+# pod, using a token kubelet mints via CSIDriver.spec.tokenRequests. Adding a
+# rule here would reintroduce the confused-deputy problem the design exists to
+# eliminate: an already-privileged DaemonSet able to read objects on behalf of
+# pods that could not read them themselves.
+#
+# There is deliberately no Role, ClusterRole, or binding for this account.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: roommate-node
+  namespace: roommate-system

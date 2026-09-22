@@ -1,0 +1,30 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: roommate.csi
+spec:
+  # No controller service exists, so nothing to attach.
+  attachRequired: false
+  # Supplies pod.namespace, pod.name, pod.uid and serviceAccount.name to
+  # NodePublishVolume. The namespace comes from here and never from
+  # volumeAttributes.
+  podInfoOnMount: true
+  # Makes kubelet mint a token for the consuming pod's ServiceAccount and pass
+  # it in the volume context. This is what lets the driver hold zero RBAC.
+  tokenRequests:
+    - audience: ""
+  # Makes kubelet re-call NodePublishVolume about ten times a second so the
+  # token stays fresh. The republish handler must therefore stay cheap and
+  # must never return an error once a target has published.
+  requiresRepublish: true
+  # File would make kubelet chown/chmod the mount whenever a pod sets
+  # fsGroup. File.Setattr correctly refuses UID/GID changes (EPERM — modes
+  # and ownership come from mount attributes, not the object) and Root
+  # implements no NodeSetattrer, so that chown would return ENOTSUP on the
+  # mount root and fail the pod's SetUp outright: any pod setting fsGroup
+  # would simply never start. None means kubelet never attempts it. A
+  # non-root consumer must set uid/gid in volumeAttributes instead — see the
+  # README.
+  fsGroupPolicy: None
+  volumeLifecycleModes:
+    - Ephemeral

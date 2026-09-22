@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.5.0
+          args: --timeout=5m
+      - name: enable FUSE allow_other
+        # The pkg/objectfs FUSE tests mount with AllowOther, matching
+        # production (the driver runs as root in a privileged DaemonSet,
+        # where this restriction doesn't apply). The runner user is
+        # unprivileged, so fusermount3 refuses -o allow_other unless
+        # user_allow_other is set in /etc/fuse.conf.
+        run: echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
+      # This intentionally is not `make check`: lint already ran above via
+      # golangci-lint-action (its own caching), and build runs as its own
+      # step below. Naming this step "make check" previously implied it ran
+      # the full check target — it doesn't — and a reviewer trusting that
+      # name once left lint red for three tasks.
+      - name: make fmt-check vet tidy-check cover
+        run: make fmt-check vet tidy-check cover
+      - name: go build ./...
+        run: go build ./...
+      - name: api semantics (envtest)
+        # setup-envtest is released as its own module starting at v0.24.0,
+        # whose go.mod requires go >= 1.26 — incompatible with the go 1.25
+        # toolchain this repo (and the k8s.io libs pinned at v0.35.7) builds
+        # with. @latest resolves to that incompatible line and fails under
+        # actions/setup-go's GOTOOLCHAIN=local. Pin instead to a resolved
+        # commit off the release-0.23 branch, which predates the module
+        # split's go1.26 bump and still builds under go 1.25.
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260305142021-f9589b9f2b9d
+          make envtest
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: make docker
+        run: make docker
+      - name: smoke test -h
+        run: docker run --rm ghcr.io/middlendian/roommate-csi:dev -h
+      - name: smoke test fusermount3 is present
+        # fuse3 supplies fusermount3, which go-fuse shells out to for
+        # unmounting; confirm it's actually in the image.
+        run: docker run --rm --entrypoint fusermount3 ghcr.io/middlendian/roommate-csi:dev -V

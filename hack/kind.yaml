@@ -1,0 +1,21 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  # The driver mounts FUSE inside a privileged DaemonSet pod via a
+  # hostPath volume at /dev/fuse (deploy/kustomize/base/daemonset.yaml).
+  # kind node containers don't inherit /dev/fuse from the outer host by
+  # default, so bind it in explicitly at the same path — on every node,
+  # control-plane included: the DaemonSet's tolerations: [{operator:
+  # Exists}] (I6) schedules it there too, not just on workers.
+  - role: control-plane
+    extraMounts:
+      - hostPath: /dev/fuse
+        containerPath: /dev/fuse
+  - role: worker
+    extraMounts:
+      - hostPath: /dev/fuse
+        containerPath: /dev/fuse
+  - role: worker
+    extraMounts:
+      - hostPath: /dev/fuse
+        containerPath: /dev/fuse

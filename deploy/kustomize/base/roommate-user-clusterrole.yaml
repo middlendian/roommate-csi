@@ -1,0 +1,26 @@
+# Convenience for operators. Bind with a RoleBinding (never a
+# ClusterRoleBinding) to scope it to one namespace:
+#
+#   kubectl create rolebinding roommate-user \
+#     --clusterrole=roommate-user \
+#     --serviceaccount=my-app:session-runner \
+#     --namespace=my-app
+#
+# This grants access to every Secret and ConfigMap in that namespace. For
+# per-object scoping, write a Role with resourceNames instead — see
+# examples/rbac.yaml. Note that a Role using resourceNames requires the client
+# to pass a metadata.name field selector on watches, which roommate does.
+#
+# Applying the binding carries no escalation risk: RBAC requires whoever
+# creates it to already hold these permissions themselves.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roommate-user
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "watch", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]

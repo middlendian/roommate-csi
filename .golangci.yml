@@ -1,0 +1,21 @@
+version: "2"
+run:
+  # test/e2e is built only under the e2e tag (it needs a live kind cluster
+  # and never runs under `go test ./...`). Without this, golangci-lint's
+  # default build never sees that package at all, and a lint defect there
+  # — like the missing package comment this line fixes — passes silently.
+  build-tags:
+    - e2e
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - misspell
+    - revive
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

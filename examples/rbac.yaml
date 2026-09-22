@@ -1,0 +1,37 @@
+# Per-object grant. This is the entire authorization story: one Role and one
+# RoleBinding, in the consuming pod's own namespace. There is nothing to grant
+# in the driver's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: my-app
+  name: roommate-oauth-credentials
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["oauth-credentials"]
+    verbs: ["get", "watch", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["roommate-oauth-credentials"]
+    verbs: ["get", "update"]
+  # RBAC cannot scope "create" by resourceNames — the object's name isn't
+  # known at authorization time, so a resourceNames-restricted create rule
+  # silently denies every create. This has to be its own, unscoped rule.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: my-app
+  name: roommate-oauth-credentials
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: roommate-oauth-credentials
+subjects:
+  - kind: ServiceAccount
+    name: session-runner
+    namespace: my-app
