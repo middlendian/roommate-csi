@@ -664,11 +664,20 @@ patch, and — with a real `Role` applied — that a watch **without** the
 last case is a fake clientset blind spot and a regression we would otherwise
 only discover in a live cluster.
 
-**End-to-end** — kind, two nodes. The test that matters is the refresh race:
-two pods on different nodes both observe an expired credential, both take
-the lock, and exactly one refresh occurs while the other observes the new
-value. Plus revocation (drop the `RoleBinding` → `EACCES`), an external
-writer touching an unrelated key, and node-plugin restart recovery.
+**End-to-end** — kind, three nodes (one control-plane, two workers — the
+DaemonSet's `tolerations: [{operator: Exists}]` schedules it onto the
+control-plane node too). The test that matters is the refresh race: two pods
+on different nodes both observe an expired credential, both take the lock,
+and exactly one refresh occurs while the other observes the new value. Plus
+revocation mid-mount (drop the `RoleBinding` after the pod is already
+running → the next lock/write attempt gets `EACCES`, and the mount itself
+survives) and node-plugin restart recovery (kill the driver process, confirm
+the pre-existing target remounts, confirm the pod still deletes cleanly).
+The fourth scenario, an external writer touching an unrelated key, is
+deliberately *not* duplicated here: it is a claim about the API server's
+merge-patch semantics, not about anything kubelet- or FUSE-specific, and
+`TestMergePatchPreservesUntouchedKeys` (envtest CLAIM 1) already verifies it
+against a real apiserver.
 
 Driving the refresh race deterministically — rather than passing by luck —
 is called out below as an open question.

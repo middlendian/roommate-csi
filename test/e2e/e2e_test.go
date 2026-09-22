@@ -346,6 +346,13 @@ func driverPodOnNodeOrNil(t *testing.T, c kubernetes.Interface, node string) *co
 
 func patchStarter(t *testing.T, c kubernetes.Interface, ns string) {
 	t.Helper()
+	setSecretKey(t, c, ns, "start", "go")
+}
+
+// setSecretKey patches oauth-credentials with a single key, used by tests
+// as a barrier-release signal a pod inside the mount polls for.
+func setSecretKey(t *testing.T, c kubernetes.Interface, ns, key, value string) {
+	t.Helper()
 	sec, err := c.CoreV1().Secrets(ns).Get(context.Background(), "oauth-credentials", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
@@ -353,8 +360,79 @@ func patchStarter(t *testing.T, c kubernetes.Interface, ns string) {
 	if sec.Data == nil {
 		sec.Data = map[string][]byte{}
 	}
-	sec.Data["start"] = []byte("go")
+	sec.Data[key] = []byte(value)
 	if _, err := c.CoreV1().Secrets(ns).Update(context.Background(), sec, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("release barrier: %v", err)
+		t.Fatalf("set %s: %v", key, err)
 	}
+}
+
+// TestMidMountRevocationSurfacesAsEACCES is I8's other missing e2e scenario:
+// spec:660-664 requires revocation (drop the RoleBinding) as a distinct case
+// from a first-publish denial. TestDeniedMountExplainsItself deletes the
+// binding *before* the pod starts, which only exercises publish()'s
+// first-mount PermissionDenied path. This test drops it *after* the mount
+// is already live, which is the only end-to-end exercise of the invariant
+// CLAUDE.md states explicitly: republish never errors, revocation surfaces
+// as EACCES from the FUSE data path, and the mount survives.
+//
+// It asserts at the flock(2) layer, not a plain write: a write's failure
+// depends on whether the shell surfaces a late close(2) error, which varies
+// by shell and isn't worth being an artifact of. flock's Lease acquisition
+// (TryAcquire's Get on the coordination.k8s.io Lease) fails with the same
+// 403-to-EACCES mapping (errnoFor) as a write would, and flock(1)'s exit
+// code is an unambiguous, portable pass/fail signal.
+func TestMidMountRevocationSurfacesAsEACCES(t *testing.T) {
+	c := mustClient(t)
+	ns := "e2e-revoked-midmount"
+	setupNamespace(t, c, ns, map[string][]byte{"session.key": []byte("v1")})
+
+	// The pod cannot wait for a second signal key the way other tests'
+	// barriers do: once RBAC is revoked, its own cache is frozen and will
+	// never observe a key added afterward. Instead it signals "ready" once
+	// (observable before revocation, while its cache still refreshes
+	// normally), then sleeps briefly to give the test time to revoke, then
+	// polls flock's failure with its own generous retry budget.
+	script := `
+set -e
+if ! command -v flock >/dev/null 2>&1; then
+  apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq util-linux >/dev/null 2>&1 || true
+fi
+test "$(cat /creds/session.key)" = v1
+flock -w 5 /creds/session.key -c true
+printf '' > /creds/ready
+sleep 5
+revoked=0
+for i in $(seq 1 30); do
+  if flock -w 1 /creds/session.key -c true 2>/tmp/lockerr; then
+    sleep 1
+  else
+    revoked=1
+    break
+  fi
+done
+if [ "$revoked" != 1 ]; then
+  echo "lock still succeeding 30s after RBAC revocation" >&2
+  exit 1
+fi
+# The mount itself must survive revocation: a read of the last-known-good
+# cached content must still succeed, per Cache.MaybeFresh's degrade-to-stale
+# behavior on a failed refresh.
+test "$(cat /creds/session.key)" = v1
+`
+	pod := podSpec("victim", ns, "", script)
+	if _, err := c.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	waitForPhase(t, c, ns, "victim", corev1.PodRunning, 3*time.Minute)
+	waitForSecretKeys(t, c, ns, []string{"ready"}, 3*time.Minute)
+
+	// Revoke mid-mount: drop the binding while the mount is already live,
+	// not before the pod ever started.
+	if err := c.RbacV1().RoleBindings(ns).Delete(
+		context.Background(), "roommate-oauth-credentials", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+
+	waitForPhase(t, c, ns, "victim", corev1.PodSucceeded, 3*time.Minute)
 }

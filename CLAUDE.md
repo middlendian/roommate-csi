@@ -38,7 +38,7 @@ deploy/kustomize/base/     namespace, driver ServiceAccount (zero RBAC),
 examples/                  rbac.yaml (per-object Role+RoleBinding), pod.yaml
 hack/                      e2e.sh, kind.yaml
 test/apisemantics/         envtest suite against a real apiserver + etcd
-test/e2e/                  kind, two nodes; build tag: e2e
+test/e2e/                  kind, three nodes (1 control-plane + 2 workers); build tag: e2e
 docs/superpowers/specs/    the v1 design doc
 docs/superpowers/plans/    the v1 implementation plan
 ```
@@ -89,7 +89,8 @@ What each target needs beyond a Go toolchain:
   spot that would otherwise only surface in a live cluster.
 - `make e2e` — Docker and `kind` on `PATH`, plus `/dev/fuse` on the host
   (the script `modprobe fuse`s if it's missing and fails loudly if that
-  doesn't work). Builds the image, loads it into a two-node kind cluster,
+  doesn't work). Builds the image, loads it into a three-node (1
+  control-plane + 2 workers) kind cluster,
   applies `deploy/kustomize/base`, and runs the `e2e`-tagged suite in
   `test/e2e/`. `TestRefreshRaceProducesExactlyOneRefresh` is the test that
   matters: it is the end-to-end proof of this driver's whole premise.
