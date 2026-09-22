@@ -2,7 +2,7 @@ BIN     := bin
 PKGS    := ./...
 GOFILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
-.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker envtest
+.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker envtest e2e
 
 build:
 	go build -o $(BIN)/roommate-node ./cmd/node
@@ -56,3 +56,6 @@ TAG     ?= dev
 
 docker:
 	docker build --build-arg VERSION=$(TAG) -t $(IMAGE):$(TAG) .
+
+e2e:
+	hack/e2e.sh
