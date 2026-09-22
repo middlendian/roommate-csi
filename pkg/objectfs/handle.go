@@ -223,7 +223,24 @@ func (h *handle) setlk(ctx context.Context, lk *fuse.FileLock, flags uint32, blo
 	lease := h.vol.NewLease()
 	if blocking {
 		if err := lease.Acquire(ctx); err != nil {
-			return syscall.EINTR
+			// EINTR is a promise to the kernel that this reply exists
+			// because *it* asked us to abort (FUSE_INTERRUPT, wired to
+			// ctx cancellation) — the kernel's fuse_simple_request()
+			// takes any EINTR reply as license to reinterpret it as
+			// -ERESTARTSYS and rely on the calling task actually having a
+			// signal pending to translate that back to a real EINTR or
+			// restart the syscall. Send EINTR when nothing actually
+			// interrupted us — e.g. a plain transient API error while
+			// polling for the Lease — and there is no pending signal to
+			// do that translation, so -ERESTARTSYS leaks to userspace
+			// verbatim ("Unknown error 512"). Only ctx's own cancellation
+			// means the kernel is the one asking; anything else is a
+			// genuine failure and must go through errnoFor like every
+			// other error path in this file.
+			if ctx.Err() != nil {
+				return syscall.EINTR
+			}
+			return errnoFor(err)
 		}
 	} else {
 		ok, err := lease.TryAcquire(ctx)

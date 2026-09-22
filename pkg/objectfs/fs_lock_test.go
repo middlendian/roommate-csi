@@ -1,12 +1,17 @@
 package objectfs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 func TestFlockExclusiveAcquiresLease(t *testing.T) {
@@ -280,5 +285,49 @@ func TestFlockRepinDropsDeletedKey(t *testing.T) {
 	if info.Size() != 0 {
 		t.Fatalf("size after lock = %d, want 0 — the key was deleted in the fresh read; "+
 			"stale pre-lock bytes must not survive the re-pin", info.Size())
+	}
+}
+
+// TestFlockBlockingSurfacesRealErrorsAsIO guards a regression that reached
+// production: a genuine (non-interrupt) failure while blocked acquiring the
+// Lease must not be reported to the kernel as EINTR. EINTR is a promise
+// that *the kernel* asked us to abort (FUSE_INTERRUPT, wired to ctx
+// cancellation); sending it for an unrelated failure makes the kernel's
+// fuse_simple_request() reinterpret the reply as -ERESTARTSYS, and — finding
+// no signal actually pending on the caller to justify a restart or a real
+// EINTR — leaks that raw kernel-internal code to userspace verbatim:
+// flock(2) returns errno 512, which strerror(3) renders as "Unknown error
+// 512". This is exactly the failure TestRefreshRaceProducesExactlyOneRefresh
+// hit end-to-end in CI. It is a real kernel/FUSE mount test, not a call
+// directly into handle.setlk, because the leak only happens once the
+// kernel's own EINTR/ERESTARTSYS translation gets involved — a direct call
+// would only ever see the errno this package returns, not what the kernel
+// does with it.
+func TestFlockBlockingSurfacesRealErrorsAsIO(t *testing.T) {
+	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
+	path := filepath.Join(dir, "session.key")
+
+	fc := vol.client.(*fake.Clientset)
+	fc.PrependReactor("get", "leases", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("injected: transient API failure")
+	})
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	if err == nil {
+		t.Fatal("Flock succeeded despite the injected Lease failure")
+	}
+	if err == syscall.EINTR {
+		t.Fatalf("Flock returned EINTR for a plain API failure with no real interrupt — "+
+			"the kernel treats an unearned EINTR reply as -ERESTARTSYS and, finding no "+
+			"signal pending, leaks it to userspace verbatim (\"Unknown error 512\"): %v", err)
+	}
+	if err != syscall.EIO {
+		t.Fatalf("Flock err = %v, want EIO", err)
 	}
 }
