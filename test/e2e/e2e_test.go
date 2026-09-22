@@ -282,10 +282,30 @@ sleep 600
 	// MkdirAll's Stat sees ENOTCONN forever, and the republish path
 	// swallows that error silently by design (see node.go's `restarting`
 	// branch), so nothing else would ever surface the failure.
+	//
+	// Both substrings must land on the SAME log line. Logs are one JSON
+	// object per line (n.log.Info("published", "target", target, ...)
+	// emits both "published" and the target path together), and checking
+	// them independently over the whole log blob is too weak: the failure
+	// path also logs "remount after restart failed", "target", target,
+	// which alone supplies the second substring, and any other volume
+	// publish on that node (including from an earlier, asynchronously-
+	// deleted test namespace whose pod is still Running) can independently
+	// supply the first. That combination lets this test pass while the
+	// actual remount is broken.
 	deadline = time.Now().Add(3 * time.Minute)
-	for {
+	found := false
+	for !found {
 		logs, err := getPodLogs(context.Background(), c, "roommate-system", newDriverPod.Name, "roommate", false)
-		if err == nil && strings.Contains(logs, "published") && strings.Contains(logs, target) {
+		if err == nil {
+			for _, line := range strings.Split(logs, "\n") {
+				if strings.Contains(line, "published") && strings.Contains(line, target) {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
 			break
 		}
 		if time.Now().After(deadline) {
