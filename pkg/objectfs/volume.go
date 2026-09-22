@@ -81,6 +81,14 @@ func ParseConfig(attr map[string]string, namespace string) (Config, error) {
 	cfg.LeaseName = attr["leaseName"]
 	if cfg.LeaseName == "" {
 		cfg.LeaseName = "roommate-" + cfg.ObjectName
+	} else if errs := validation.IsDNS1123Subdomain(cfg.LeaseName); len(errs) > 0 {
+		// The derived default above is guaranteed valid (objectName already
+		// passed this same check, and the "roommate-" prefix can't break
+		// it), but an operator-supplied override is unvalidated input. Left
+		// unchecked, an invalid leaseName parses fine at mount time and only
+		// fails at the first flock — the worst possible place to discover a
+		// typo.
+		return Config{}, fmt.Errorf("roommate: leaseName %q is not a valid object name: %s", cfg.LeaseName, errs[0])
 	}
 
 	var err error

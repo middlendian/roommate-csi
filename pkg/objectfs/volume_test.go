@@ -78,6 +78,10 @@ func TestParseConfigRejectsBadInput(t *testing.T) {
 		{"bad object name", map[string]string{"objectKind": "Secret", "objectName": "Not_Valid"}, "my-app"},
 		{"bad file mode", map[string]string{"objectKind": "Secret", "objectName": "x", "fileMode": "zzz"}, "my-app"},
 		{"missing namespace", map[string]string{"objectKind": "Secret", "objectName": "x"}, ""},
+		// M14: an operator-supplied leaseName override is unvalidated input,
+		// unlike the derived default. Left unchecked, this parses fine at
+		// mount time and only fails at the first flock.
+		{"bad lease name", map[string]string{"objectKind": "Secret", "objectName": "x", "leaseName": "Not Valid!"}, "my-app"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
