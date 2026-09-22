@@ -28,6 +28,13 @@ func (r *Root) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sy
 	out.Mode = fuse.S_IFDIR | r.vol.Cfg.DirMode
 	out.Uid = r.vol.Cfg.UID
 	out.Gid = r.vol.Cfg.GID
+	// A directory's link count is conventionally 2 (its own "." entry plus
+	// the ".." each child would have, were this filesystem to support
+	// subdirectories) even though this one never gains real subdirectories.
+	// Leaving it 0 — as fillFileAttr's Nlink=1 convention for regular files
+	// doesn't apply here — reports a directory with no links to itself,
+	// which programs checking st_nlink treat as already unlinked.
+	out.Nlink = 2
 	return 0
 }
 
@@ -142,17 +149,47 @@ func (f *File) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	if _, ok := in.GetGID(); ok {
 		return syscall.EPERM
 	}
+
+	h, hasHandle := fh.(*handle)
 	if size, ok := in.GetSize(); ok {
-		if h, ok := fh.(*handle); ok {
+		if hasHandle {
 			h.truncate(size)
 		} else if errno := f.truncateCommitted(ctx, size); errno != 0 {
 			return errno
 		}
-		out.Size = size
 	}
-	out.Mode = fuse.S_IFREG | f.vol.Cfg.FileMode
-	out.Uid = f.vol.Cfg.UID
-	out.Gid = f.vol.Cfg.GID
+
+	// Fill in every field of AttrOut, not just the ones this SETATTR
+	// happened to touch: go-fuse's bridge patches only out.Mode's type bits
+	// after this handler returns (fs/bridge.go SetAttr), so anything left
+	// zero here is exactly what the kernel applies. A SETATTR carrying only
+	// ATIME/MTIME — a plain touch(1), or cp -p, or os.Chtimes — matches
+	// neither branch above; returning a bare AttrOut with Size and Nlink
+	// still zero makes the kernel truncate the page cache to 0 and mark a
+	// live inode unlinked, from a single touch. fillFileAttr is the same
+	// helper Lookup and Getattr use, so this always reports the same shape
+	// they do.
+	postSize := postSetattrSize(ctx, f, h, hasHandle)
+	fillFileAttr(&out.Attr, f.vol.Cfg, postSize)
+	return 0
+}
+
+// postSetattrSize returns the size Setattr should report: an open handle's
+// pinned buffer (post-truncate, if this call truncated it), or the current
+// snapshot's value when there is no handle — the same two sources
+// File.Getattr uses, for the same reason (an open handle's fstat must never
+// disagree with what Read on that same fd will return).
+func postSetattrSize(ctx context.Context, f *File, h *handle, hasHandle bool) int {
+	if hasHandle {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return len(h.buf)
+	}
+	if snap := f.vol.Cache.MaybeFresh(ctx); snap != nil {
+		if value, ok := snap.Get(f.key); ok {
+			return len(value)
+		}
+	}
 	return 0
 }
 
