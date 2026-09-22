@@ -51,22 +51,122 @@ func TestLeaseTryAcquireFailsWhenHeldAndLive(t *testing.T) {
 	}
 }
 
-// A crashed holder must not block forever: past renewTime+duration the lease
-// is up for grabs.
+// A crashed holder must not block forever, but per the clock-skew fix
+// (claimable now measures expiry against our own observation time, never
+// the remote RenewTime directly — see claimable's doc comment) a single
+// TryAcquire against an already-stale lease does NOT take over on first
+// sight: that first sighting only starts our local observation clock. Only
+// after we've continued to observe the same (holder, renewTime) pair for a
+// further full duration do we take over. This test backdates the
+// observation directly to simulate that further wait without an actual
+// sleep.
 func TestLeaseTryAcquireTakesOverExpired(t *testing.T) {
 	stale := liveLease("podB:1", testLeaseDur, time.Now().Add(-time.Hour))
 	c := fake.NewSimpleClientset(stale)
 	m := NewLeaseManager(c, "my-app", "roommate-oauth-credentials", "podA:1", testLeaseDur)
 
 	ok, err := m.TryAcquire(context.Background())
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	if ok {
+		t.Fatal("TryAcquire took over on first sight of a stale lease — the observation window was skipped")
+	}
+
+	m.obsMu.Lock()
+	m.obs.at = time.Now().Add(-testLeaseDur - time.Second)
+	m.obsMu.Unlock()
+
+	ok, err = m.TryAcquire(context.Background())
 	if err != nil || !ok {
-		t.Fatalf("TryAcquire = %v, %v; want true, nil on an expired lease", ok, err)
+		t.Fatalf("TryAcquire = %v, %v; want true once the observation window has elapsed", ok, err)
 	}
 
 	got, _ := c.CoordinationV1().Leases("my-app").
 		Get(context.Background(), "roommate-oauth-credentials", metav1.GetOptions{})
 	if *got.Spec.HolderIdentity != "podA:1" {
 		t.Fatalf("holderIdentity = %v, want podA:1", *got.Spec.HolderIdentity)
+	}
+}
+
+// TestLeaseClaimableNotClaimableOnFirstSighting is the direct regression
+// test for the clock-skew fix: a foreign, live-looking lease whose
+// RenewTime is long past renewTime+duration must NOT be claimable the very
+// first time we see it — only once we've observed it, unchanged, for a
+// full duration on OUR OWN clock. Against the pre-fix implementation
+// (`time.Now().After(l.Spec.RenewTime.Add(dur))`, comparing directly to the
+// remote clock) this lease — renewed an hour ago against a 15s duration —
+// would be judged claimable immediately; this assertion fails there.
+func TestLeaseClaimableNotClaimableOnFirstSighting(t *testing.T) {
+	m := NewLeaseManager(fake.NewSimpleClientset(), "my-app", "roommate-oauth-credentials", "podA:1", testLeaseDur)
+	stale := liveLease("podB:1", testLeaseDur, time.Now().Add(-time.Hour))
+
+	if m.claimable(stale) {
+		t.Fatal("claimable = true on first sighting of a foreign lease; " +
+			"want false — a single sighting must not be enough to take over, " +
+			"regardless of how stale the remote RenewTime looks")
+	}
+}
+
+// TestLeaseClaimableAfterObservationWindow confirms the other half: once
+// we've continued to observe the same foreign (holder, renewTime) pair for
+// a full duration, it becomes claimable.
+func TestLeaseClaimableAfterObservationWindow(t *testing.T) {
+	m := NewLeaseManager(fake.NewSimpleClientset(), "my-app", "roommate-oauth-credentials", "podA:1", testLeaseDur)
+	stale := liveLease("podB:1", testLeaseDur, time.Now().Add(-time.Hour))
+
+	if m.claimable(stale) {
+		t.Fatal("claimable = true on first sighting; want false")
+	}
+
+	m.obsMu.Lock()
+	m.obs.at = time.Now().Add(-testLeaseDur - time.Second)
+	m.obsMu.Unlock()
+
+	if !m.claimable(stale) {
+		t.Fatal("claimable = false after the observation window elapsed; want true")
+	}
+}
+
+// TestLeaseClaimableResetsWhenRenewTimeAdvances proves the core safety
+// property: a holder that keeps renewing is never stolen from, no matter
+// how far the local clock has apparently drifted (simulated here by
+// backdating our observation arbitrarily far into the past — the same
+// state a real clock-skewed node would reach). A renewal changes
+// RenewTime, which must reset the observation clock rather than let stale
+// backdating carry over.
+//
+// Both RenewTimes here are themselves deliberately in the past — 2h and 1h
+// ago respectively, well beyond testLeaseDur — modelling a local clock that
+// runs far enough ahead of the holder's for every renewal to still look
+// stale by a direct comparison. t2 is simply later than t1, exactly as it
+// would be after one real renewal by a healthy holder. This is what makes
+// the test discriminate: against the pre-fix implementation
+// (time.Now().After(RenewTime.Add(dur)), comparing straight to the remote
+// clock) t2 alone is judged expired and claimable — this test's final
+// assertion fails there, proving it exercises the property it claims to.
+func TestLeaseClaimableResetsWhenRenewTimeAdvances(t *testing.T) {
+	m := NewLeaseManager(fake.NewSimpleClientset(), "my-app", "roommate-oauth-credentials", "podA:1", testLeaseDur)
+	t1 := liveLease("podB:1", testLeaseDur, time.Now().Add(-2*time.Hour))
+
+	if m.claimable(t1) {
+		t.Fatal("claimable = true on first sighting; want false")
+	}
+
+	// Simulate a wildly skewed local clock: our observation looks ancient,
+	// far past the point where an unreset observation would be claimable.
+	m.obsMu.Lock()
+	m.obs.at = time.Now().Add(-24 * time.Hour)
+	m.obsMu.Unlock()
+
+	// The holder renews — a later RenewTime on the same lease, still an
+	// hour in the past by direct comparison, but strictly newer than t1.
+	t2 := liveLease("podB:1", testLeaseDur, time.Now().Add(-time.Hour))
+
+	if m.claimable(t2) {
+		t.Fatal("claimable = true right after the holder renewed; " +
+			"want false — the observation must reset on a renewal, " +
+			"not be judged against the old (skewed) observation time")
 	}
 }
 

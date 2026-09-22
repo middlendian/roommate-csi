@@ -54,6 +54,23 @@ type LeaseManager struct {
 	held    bool
 	healthy bool
 	cancel  context.CancelFunc
+
+	// obsMu guards obs, the local-clock observation of the last foreign
+	// (holderIdentity, renewTime) pair claimable has seen. It is separate
+	// from mu because claimable runs without mu held (see TryAcquire).
+	obsMu sync.Mutex
+	obs   leaseObservation
+}
+
+// leaseObservation records, using our own clock only, when we first saw the
+// current holder+renewTime pair on a foreign Lease. claimable measures
+// expiry against observedAt, never against the remote RenewTime directly —
+// see claimable's comment for why.
+type leaseObservation struct {
+	holder    string
+	renewTime time.Time
+	at        time.Time
+	valid     bool
 }
 
 // NewLeaseManager returns a manager for the named Lease. holder must be
@@ -182,6 +199,31 @@ func (m *LeaseManager) Release(ctx context.Context) error {
 }
 
 // claimable reports whether the lease is free, expired, or already ours.
+//
+// A lease with no holder, no RenewTime, or held by us needs no clock at all
+// and is claimable immediately — that also mitigates the observation-window
+// cost below for the cases where it isn't needed. A genuinely foreign,
+// live-looking lease is judged expired against OUR OWN clock's record of
+// when we first observed its current (holderIdentity, renewTime) pair,
+// never against the remote RenewTime directly.
+//
+// This matters because RenewTime is stamped by the remote holder's clock.
+// Comparing it against our local time.Now() (the old behaviour) means a
+// local clock running more than leaseDurationSeconds ahead of the holder's
+// judges a lease the holder just renewed as expired. The CAS then succeeds
+// — there is no conflict, just a stale view — and both sides believe they
+// hold the lock. client-go's leaderelection avoids exactly this by
+// recording a local observedTime whenever the record changes and measuring
+// expiry from that; this mirrors it.
+//
+// Consequence, deliberately accepted: reclaiming a crashed holder's lease
+// now takes up to ~2x leaseDurationSeconds instead of 1x, because the first
+// sighting of the crashed holder's now-stale record only starts our clock;
+// we still wait a further full duration of continued silence before
+// treating it as ours to take. A single, isolated TryAcquire (the
+// flock(LOCK_NB) path) against an already-expired foreign lease will now
+// return false on first attempt, since it has no observation history yet —
+// legitimately EWOULDBLOCK, but a real behavioural change from before.
 func (m *LeaseManager) claimable(l *coordv1.Lease) bool {
 	if l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "" {
 		return true
@@ -196,7 +238,23 @@ func (m *LeaseManager) claimable(l *coordv1.Lease) bool {
 	if l.Spec.LeaseDurationSeconds != nil {
 		dur = time.Duration(*l.Spec.LeaseDurationSeconds) * time.Second
 	}
-	return time.Now().After(l.Spec.RenewTime.Add(dur))
+
+	holder := *l.Spec.HolderIdentity
+	renewTime := l.Spec.RenewTime.Time
+
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+
+	if !m.obs.valid || m.obs.holder != holder || !m.obs.renewTime.Equal(renewTime) {
+		// First sighting of this (holder, renewTime) pair — including the
+		// very first sighting of this lease at all, and every time the
+		// holder renews. A holder that keeps renewing therefore never
+		// becomes claimable no matter how stale our previous observation
+		// was, regardless of clock skew.
+		m.obs = leaseObservation{holder: holder, renewTime: renewTime, at: time.Now(), valid: true}
+		return false
+	}
+	return time.Since(m.obs.at) > dur
 }
 
 func (m *LeaseManager) create(ctx context.Context) error {

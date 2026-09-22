@@ -249,26 +249,48 @@ func TestLeaseManagerCASRejectsStaleWriter(t *testing.T) {
 	c, ns := setup(t)
 	ctx := context.Background()
 
+	// tinyDuration stands in for leaseDurationSeconds here. The seeded
+	// Lease deliberately leaves LeaseDurationSeconds nil so claimable falls
+	// back to each LeaseManager's own duration (see claimable in
+	// pkg/objectfs/lease.go). It can't go below 1s: takeOver/create derive
+	// spec.leaseDurationSeconds from it via int32(duration/time.Second),
+	// and the real API server rejects 0 as invalid.
+	const tinyDuration = time.Second
+
 	const rounds = 25
 	for i := 0; i < rounds; i++ {
 		leaseName := fmt.Sprintf("race-%d", i)
 		staleHolder := "long-gone-holder"
 		expired := metav1.NewMicroTime(time.Now().Add(-time.Hour))
-		durSecs := int32(1)
 		_, err := c.CoordinationV1().Leases(ns).Create(ctx, &coordv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: ns},
 			Spec: coordv1.LeaseSpec{
-				HolderIdentity:       &staleHolder,
-				LeaseDurationSeconds: &durSecs,
-				RenewTime:            &expired,
+				HolderIdentity: &staleHolder,
+				RenewTime:      &expired,
 			},
 		}, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("round %d: seed expired lease: %v", i, err)
 		}
 
-		mgrA := objectfs.NewLeaseManager(c, ns, leaseName, fmt.Sprintf("node-a:%d", i), objectfs.DefaultLeaseDuration)
-		mgrB := objectfs.NewLeaseManager(c, ns, leaseName, fmt.Sprintf("node-b:%d", i), objectfs.DefaultLeaseDuration)
+		mgrA := objectfs.NewLeaseManager(c, ns, leaseName, fmt.Sprintf("node-a:%d", i), tinyDuration)
+		mgrB := objectfs.NewLeaseManager(c, ns, leaseName, fmt.Sprintf("node-b:%d", i), tinyDuration)
+
+		// Since the clock-skew fix (final-wave item 4), a foreign lease is
+		// judged expired against each LeaseManager's own local observation
+		// time, not the remote RenewTime directly — so a lone TryAcquire
+		// against an already-stale lease no longer takes over on first
+		// sight; it only starts that manager's observation clock. Prime
+		// both managers sequentially, then wait out tinyDuration, so the
+		// race below exercises the CAS guard this test is actually about
+		// rather than the (separately tested) observation window.
+		if ok, err := mgrA.TryAcquire(ctx); err != nil || ok {
+			t.Fatalf("round %d: priming TryAcquire for A = %v, %v; want false, nil on first sighting", i, ok, err)
+		}
+		if ok, err := mgrB.TryAcquire(ctx); err != nil || ok {
+			t.Fatalf("round %d: priming TryAcquire for B = %v, %v; want false, nil on first sighting", i, ok, err)
+		}
+		time.Sleep(tinyDuration + 200*time.Millisecond)
 
 		// Release both goroutines together so their TryAcquire calls'
 		// Get-then-Update windows overlap on the real API server as often as

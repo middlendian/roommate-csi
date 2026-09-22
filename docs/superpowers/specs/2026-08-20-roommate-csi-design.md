@@ -490,14 +490,55 @@ spec:
   lock as long as it wants, as on a local filesystem.
 - A blocking `flock(LOCK_EX)` against a live holder **blocks indefinitely**,
   interruptible via FUSE's interrupt path so a signal still breaks it.
-  `LOCK_NB` returns `EWOULDBLOCK` immediately.
+  `LOCK_NB` returns `EWOULDBLOCK` immediately — including, now, against a
+  foreign Lease this node has never seen before but whose remote
+  `renewTime` already looks expired: see clock-skew handling below, which
+  requires an observation history `LOCK_NB`'s single attempt doesn't have.
 - `LOCK_SH` maps to the same exclusive Lease. Over-strict — concurrent
   readers serialize — but a caller taking a shared lock is asking for "no
   writer is mid-write", and only the Lease can actually promise that.
   Readers that do not lock are unaffected and stay fast.
 - Acquisition: `GET` the Lease; create it if absent; take ownership if
-  present but expired (`renewTime + duration < now`), using CAS on the
-  Lease's own `resourceVersion`; otherwise back off and retry.
+  present but expired, using CAS on the Lease's own `resourceVersion`;
+  otherwise back off and retry. "Expired" is judged against **our own
+  local observation clock**, not the remote `renewTime` directly — see
+  below.
+
+#### Clock skew: expiry is judged against our own observation, not the remote clock
+
+The straightforward rule — take over once `renewTime + duration < now` —
+compares a timestamp stamped by the *remote* holder's clock against *our*
+`time.Now()`. If our node's clock runs more than `leaseDurationSeconds`
+ahead of the holder's, we judge a Lease the holder just renewed as expired.
+The CAS still succeeds — there's no conflict, just a stale view — so both
+sides end up believing they hold the lock, both read, and both refresh.
+Fencing (below) catches the resulting bad *commit*, but the damage to an
+OAuth refresh token is done the moment the second `refresh` call goes out;
+a fenced Kubernetes write can't un-consume a rotated token.
+
+`LeaseManager` avoids this the way `client-go`'s own `leaderelection` does:
+it caches `(holderIdentity, renewTime, observedAt)` across polls, where
+`observedAt` is stamped by **our** clock the moment we first see that
+`(holderIdentity, renewTime)` pair. A foreign Lease is claimable only once
+`time.Since(observedAt) > duration` — never by comparing `renewTime`
+directly to `now`. Every time `renewTime` advances (the holder renewed) the
+observation resets, so a holder that keeps renewing is never stolen from,
+no matter how far a reader's local clock has drifted. A Lease with no
+holder, no `renewTime`, or held by us needs no clock at all and is
+claimable immediately, sidestepping the cost below where it isn't needed.
+
+Two consequences, accepted deliberately:
+
+- **Reclaiming a crashed holder's Lease now takes up to ~2x
+  `leaseDurationSeconds`** instead of 1x — the first sighting of the
+  crashed holder's now-stale record only starts the observation clock; a
+  further full duration of continued silence is required before we'll take
+  it over.
+- **A single, isolated `TryAcquire` (the `LOCK_NB` path) against an
+  already-expired foreign Lease now returns not-ok on first attempt**,
+  since it has no observation history yet. `EWOULDBLOCK` is a legitimate
+  answer to "is this locked right now", but it's a real behavioural change
+  from a version that would have taken over immediately.
 
 ### Ordering is load-bearing
 
@@ -598,7 +639,7 @@ Documented, not solved in v1.
 | Condition | Behaviour |
 |---|---|
 | API server unreachable | reads serve last-known-good; writes `EIO` (fail closed) |
-| Lease holder crashes | 15s expiry, next acquirer takes over |
+| Lease holder crashes | claimable once a local observer has seen the same stale record for a full 15s (up to ~30s total; see clock-skew section) |
 | Watch disconnects | quorum `GET` before trusting cache again |
 | Token expired, republish stalled | reads from cache; writes `EIO` |
 | RBAC revoked mid-mount | next API call `403` → `EACCES`; mount survives |

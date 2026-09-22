@@ -270,6 +270,13 @@ Stated here rather than discovered later:
   `resourceVersion` compare-and-swap on the write path.
 - **Whole-file locking only.** `flock` maps to one Lease per object; POSIX
   byte-range locks (`fcntl F_SETLK`) are not supported.
+- **Lease expiry is judged against each node's own clock observation, not
+  the remote holder's timestamp** — this avoids a fast local clock stealing
+  a Lease a healthy holder just renewed, at the cost of reclaiming a
+  crashed holder's Lease taking up to ~2x `leaseDurationSeconds` instead of
+  1x, and a lone non-blocking `flock(LOCK_NB)` against an already-expired
+  Lease returning `EWOULDBLOCK` on its first attempt rather than taking
+  over immediately. See the design doc's clock-skew section.
 - **~1 MiB ceiling**, inherited from etcd's practical object-size limit.
 - **Flat namespace.** Object keys have no subdirectories; `mkdir`, `symlink`,
   and `link` all return `ENOTSUP`.
