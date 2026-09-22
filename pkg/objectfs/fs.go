@@ -65,7 +65,7 @@ func (r *Root) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	}
 	child := &File{vol: r.vol, key: name}
 	fillFileAttr(&out.Attr, r.vol.Cfg, len(value))
-	return r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG}), 0
+	return r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG, Ino: hashKey(name)}), 0
 }
 
 // Mkdir always fails: object keys are flat, so a directory cannot exist.
@@ -91,7 +91,7 @@ func (r *Root) Create(ctx context.Context, name string, _, _ uint32, out *fuse.E
 	h := newHandle(r.vol, name, r.vol.Cache.Current(), nil)
 	h.dirty = true // an empty create must still produce a key
 	fillFileAttr(&out.Attr, r.vol.Cfg, 0)
-	inode := r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG})
+	inode := r.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG, Ino: hashKey(name)})
 	return inode, h, 0, 0
 }
 

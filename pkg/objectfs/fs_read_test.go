@@ -115,3 +115,46 @@ func TestSubdirectoriesAreRejected(t *testing.T) {
 		t.Fatal("Mkdir succeeded; object keys are flat so it must fail")
 	}
 }
+
+// TestStatReportsStableInode is I5's regression guard: fs.Options.EntryTimeout
+// is nil, so the kernel re-looks-up a path on essentially every access.
+// Before hashKey, Lookup left StableAttr.Ino at its zero value, and
+// go-fuse's newInodeUnlocked fills a zero Ino from an incrementing counter
+// — so every open()/stat() by path minted a fresh inode number for what is,
+// as far as any consumer can tell, the very same file. Programs that detect
+// rotation by comparing inode identity (os.SameFile, a raw st_ino compare)
+// see the file as replaced on every check.
+func TestStatReportsStableInode(t *testing.T) {
+	dir, _ := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
+	path := filepath.Join(dir, "session.key")
+
+	first, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat 1: %v", err)
+	}
+	second, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat 2: %v", err)
+	}
+	if !os.SameFile(first, second) {
+		t.Fatal("two stats of the same path report different inodes")
+	}
+}
+
+// Two distinct keys must not collide onto the same inode number — that
+// would make go-fuse's addNewChild treat them as the same node.
+func TestStatReportsDistinctInodesForDistinctKeys(t *testing.T) {
+	dir, _ := mountForTest(t, map[string][]byte{"a": []byte("1"), "b": []byte("2")})
+
+	sa, err := os.Stat(filepath.Join(dir, "a"))
+	if err != nil {
+		t.Fatalf("Stat a: %v", err)
+	}
+	sb, err := os.Stat(filepath.Join(dir, "b"))
+	if err != nil {
+		t.Fatalf("Stat b: %v", err)
+	}
+	if os.SameFile(sa, sb) {
+		t.Fatal("distinct keys a and b report the same inode")
+	}
+}

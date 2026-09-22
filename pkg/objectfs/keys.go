@@ -1,6 +1,9 @@
 package objectfs
 
-import "regexp"
+import (
+	"hash/fnv"
+	"regexp"
+)
 
 // maxKeyLen matches the API server's limit on a data map key.
 const maxKeyLen = 253
@@ -16,4 +19,17 @@ func ValidKey(name string) bool {
 		return false
 	}
 	return keyPattern.MatchString(name)
+}
+
+// hashKey derives a stable inode number from an object key. Every fs.NodeXxxer
+// call site that mints a *File for the same key must pass the same value
+// here, so go-fuse's addNewChild (which deduplicates by StableAttr, Ino
+// included) recognizes repeat lookups of the same key as the same inode
+// instead of minting a fresh one from its own incrementing counter each
+// time. FNV-64a is not cryptographic — it doesn't need to be, only stable
+// and cheap.
+func hashKey(key string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(key))
+	return h.Sum64()
 }
