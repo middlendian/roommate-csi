@@ -167,6 +167,37 @@ func waitForPhase(t *testing.T, c kubernetes.Interface, ns, name string, want co
 	}
 }
 
+// waitForSecretKeys blocks until oauth-credentials carries every key in
+// want, or d elapses. It is a rendezvous primitive for tests that need to
+// know several independent processes have each reached a specific point —
+// each process proves it by writing its own key through the mount — rather
+// than guessing via a fixed sleep after a phase transition that only proves
+// the container started.
+func waitForSecretKeys(t *testing.T, c kubernetes.Interface, ns string, want []string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		sec, err := c.CoreV1().Secrets(ns).Get(context.Background(), "oauth-credentials", metav1.GetOptions{})
+		if err == nil {
+			var missing []string
+			for _, k := range want {
+				if _, ok := sec.Data[k]; !ok {
+					missing = append(missing, k)
+				}
+			}
+			if len(missing) == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("oauth-credentials never gained keys %v (still missing %v after %s)", want, missing, d)
+			}
+		} else if time.Now().After(deadline) {
+			t.Fatalf("get secret: %v", err)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 // describePod logs everything useful for post-mortem: the pod's events, its
 // container statuses (exit code / reason / message), and both the current
 // and any previous-incarnation container logs, plus the roommate-node

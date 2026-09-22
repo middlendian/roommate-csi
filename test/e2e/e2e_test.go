@@ -83,9 +83,11 @@ func TestDeniedMountExplainsItself(t *testing.T) {
 // both try to refresh. The lock plus the mandatory fresh read must mean
 // exactly one refresh happens.
 //
-// Determinism comes from a barrier: neither pod proceeds until a starter key
-// appears, so both are guaranteed to be contending rather than arriving
-// sequentially by luck.
+// Determinism comes from a barrier: neither pod proceeds past its own
+// waiting-<name> marker until a starter key appears, and the test does not
+// release that starter until it has observed both markers — so both
+// contenders are guaranteed to be genuinely contending (blocked on the same
+// Setlkw from different nodes) rather than arriving sequentially by luck.
 func TestRefreshRaceProducesExactlyOneRefresh(t *testing.T) {
 	c := mustClient(t)
 	ns := "e2e-refresh-race"
@@ -94,17 +96,37 @@ func TestRefreshRaceProducesExactlyOneRefresh(t *testing.T) {
 	})
 
 	nodes := workerNodes(t, c)
+	names := []string{"contender-a", "contender-b"}
 
-	// Each contender: wait for the barrier, lock, re-read, and refresh ONLY
-	// if the credential is still expired. flock(1) holds the lock for the
-	// whole subshell. debian:bookworm-slim already ships flock via
-	// util-linux (an essential package); the apt-get is a defensive
-	// fallback, only hit if that ever changes.
+	// Each contender: record that it has reached the barrier, wait for the
+	// barrier to release, lock, re-read, and refresh ONLY if the credential
+	// is still expired. flock(1) holds the lock for the whole subshell.
+	// debian:bookworm-slim already ships flock via util-linux (an essential
+	// package); the apt-get is a defensive fallback, only hit if that ever
+	// changes.
+	//
+	// Each contender records its own outcome under its own key
+	// (refreshed-<name>) instead of appending to one shared counter key.
+	// Commits are per-key merge patches with no CAS, no read-modify-write,
+	// and no retry (pkg/objectfs/commit.go), and the two contenders run on
+	// different nodes with independent caches. A shared counter key is
+	// exactly the write a lost update hides behind: if the lock or the
+	// mandatory fresh read failed and both contenders were granted
+	// concurrently, both would read the counter as empty and both write the
+	// same one-byte value — the test would see length 1 even though both
+	// refreshed. Two distinct keys cannot suffer that: a merge patch only
+	// ever touches the key(s) it names, so both contenders' patches land
+	// regardless of ordering (proved against a real API server by
+	// TestMergePatchPreservesUntouchedKeys in test/apisemantics). Counting
+	// which marker keys exist therefore tells us how many contenders
+	// actually refreshed, not just a length that a correct and a buggy run
+	// can produce identically.
 	script := `
 set -e
 if ! command -v flock >/dev/null 2>&1; then
   apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq util-linux >/dev/null 2>&1 || true
 fi
+printf '' > /creds/waiting-%s
 for i in $(seq 1 120); do
   [ -f /creds/start ] && break
   sleep 1
@@ -113,27 +135,35 @@ flock /creds/session.key -c '
   cur=$(cat /creds/session.key)
   if [ "$cur" = EXPIRED ]; then
     printf REFRESHED-%s > /creds/session.key
-    printf 1 >> /creds/refreshes
+    printf "" > /creds/refreshed-%s
   fi
 '
 `
 	for i, node := range nodes[:2] {
-		name := []string{"contender-a", "contender-b"}[i]
+		name := names[i]
 		pod := podSpec(name, ns, node, strings.ReplaceAll(script, "%s", name))
 		if _, err := c.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
 	}
 
-	// Wait for both to be running and blocked on the barrier, then release.
-	for _, name := range []string{"contender-a", "contender-b"} {
+	// Wait for both to be running, then for both to have actually reached
+	// the barrier poll loop. PodRunning only proves the container started;
+	// waiting for each contender's own waiting-<name> key is a real
+	// rendezvous, not a guess that a fixed sleep gave both scripts enough
+	// time to get there.
+	for _, name := range names {
 		waitForPhase(t, c, ns, name, corev1.PodRunning, 3*time.Minute)
 	}
-	time.Sleep(5 * time.Second) // let both reach the barrier loop
+	waiting := make([]string, len(names))
+	for i, name := range names {
+		waiting[i] = "waiting-" + name
+	}
+	waitForSecretKeys(t, c, ns, waiting, 3*time.Minute)
 
 	patchStarter(t, c, ns)
 
-	for _, name := range []string{"contender-a", "contender-b"} {
+	for _, name := range names {
 		waitForPhase(t, c, ns, name, corev1.PodSucceeded, 3*time.Minute)
 	}
 
@@ -142,15 +172,25 @@ flock /creds/session.key -c '
 		t.Fatalf("get secret: %v", err)
 	}
 
-	refreshes := len(sec.Data["refreshes"])
-	if refreshes != 1 {
-		t.Fatalf("refreshes = %d, want exactly 1; value = %q. More than one means "+
-			"the lock or the guaranteed-fresh read failed, which is the exact "+
-			"failure this driver exists to prevent",
-			refreshes, sec.Data["session.key"])
+	var winners []string
+	for _, name := range names {
+		if _, ok := sec.Data["refreshed-"+name]; ok {
+			winners = append(winners, name)
+		}
 	}
-	if !strings.HasPrefix(string(sec.Data["session.key"]), "REFRESHED-") {
-		t.Fatalf("session.key = %q, want a REFRESHED- value", sec.Data["session.key"])
+	if len(winners) != 1 {
+		t.Fatalf("contenders that refreshed = %v (want exactly 1); session.key = %q. "+
+			"More than one means the lock or the guaranteed-fresh read failed, which is "+
+			"the exact failure this driver exists to prevent; zero means neither ever "+
+			"observed EXPIRED",
+			winners, sec.Data["session.key"])
+	}
+	// The invariant is "exactly one contender refreshed" — name which one
+	// and assert session.key agrees, rather than accepting either value.
+	want := "REFRESHED-" + winners[0]
+	if string(sec.Data["session.key"]) != want {
+		t.Fatalf("session.key = %q, want %q — %s's own marker says it won the race",
+			sec.Data["session.key"], want, winners[0])
 	}
 }
 
