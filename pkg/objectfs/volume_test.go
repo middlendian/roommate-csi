@@ -5,6 +5,17 @@ import (
 	"time"
 )
 
+// TestParseConfigDefaults deliberately compares StalenessBound and
+// LeaseDuration against literal durations (30s, 15s: README's
+// Configuration table and spec:610-611), not against
+// DefaultStalenessBound/DefaultLeaseDuration. Same shape as the
+// volume-context key-constant bug (see pkg/podtoken/keys_test.go): a
+// comparison built from the constant itself is tautological, since both
+// sides drift together — change either default to, say, five minutes and a
+// constant-vs-constant assertion still passes while the README, the spec,
+// and the whole staleness-bound failure analysis all still say otherwise.
+// These two numbers are a published contract, not an implementation
+// detail. Do not "simplify" this back to referencing the constants.
 func TestParseConfigDefaults(t *testing.T) {
 	cfg, err := ParseConfig(map[string]string{
 		"objectKind": "Secret",
@@ -22,11 +33,11 @@ func TestParseConfigDefaults(t *testing.T) {
 	if cfg.DirMode != 0o700 {
 		t.Errorf("DirMode = %o, want 700", cfg.DirMode)
 	}
-	if cfg.StalenessBound != DefaultStalenessBound {
-		t.Errorf("StalenessBound = %v, want %v", cfg.StalenessBound, DefaultStalenessBound)
+	if cfg.StalenessBound != 30*time.Second {
+		t.Errorf("StalenessBound = %v, want 30s", cfg.StalenessBound)
 	}
-	if cfg.LeaseDuration != DefaultLeaseDuration {
-		t.Errorf("LeaseDuration = %v, want %v", cfg.LeaseDuration, DefaultLeaseDuration)
+	if cfg.LeaseDuration != 15*time.Second {
+		t.Errorf("LeaseDuration = %v, want 15s", cfg.LeaseDuration)
 	}
 	// Namespace always comes from pod info, never from attributes.
 	if cfg.Namespace != "my-app" {

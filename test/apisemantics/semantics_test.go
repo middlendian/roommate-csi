@@ -125,13 +125,27 @@ func TestMergePatchNullDeletesKey(t *testing.T) {
 	if _, ok := snap.Get("b"); ok {
 		t.Error("b survived a null patch")
 	}
-	if _, ok := snap.Get("a"); !ok {
-		t.Error("a was removed by a patch that only nulled b")
+	// Not just present — intact. C2's fix (Cache.setFromWatch) and every
+	// other place that leans on "a merge patch touches only the keys it
+	// names" needs the untouched sibling's *value* preserved, not merely
+	// that the key still exists.
+	if v, ok := snap.Get("a"); !ok || string(v) != "1" {
+		t.Errorf("a = %q (present=%v), want \"1\" — a patch that only nulled b must not touch a's value", v, ok)
 	}
 }
 
-// CLAIM 3: a quorum GET reflects a just-completed patch. This is the
-// read-after-write guarantee the lock protocol sells.
+// CLAIM 3: exercises 20 rounds of patch-then-Get and asserts each Get
+// reflects the immediately preceding patch. This does NOT prove quorum
+// semantics, despite living next to the tests that do: envtest runs a
+// single-member apiserver + etcd, where the watch cache (what a
+// ResourceVersion: "0" Get would be served from) lags real writes by
+// something close to zero — a multi-member, more realistically-lagged
+// cluster could pass every round here while a non-quorum Get would still be
+// a bug. The falsifiable guard for "this Store issues a genuine quorum
+// read" is TestSecretStoreGetIsQuorumRead (pkg/objectfs/store_secret_test.go),
+// which inspects the actual GetOptions.ResourceVersion sent on the wire.
+// What this test is actually good for: a real, if weak, end-to-end signal
+// that Patch and Get are talking to the same backing object at all.
 func TestQuorumGetSeesJustCompletedPatch(t *testing.T) {
 	c, ns := setup(t)
 	ctx := context.Background()
