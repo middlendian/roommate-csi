@@ -213,6 +213,26 @@ The namespace is always the consuming pod's own, taken from
 `podInfoOnMount` — it is never configurable, because cross-namespace access
 is a non-goal.
 
+**Non-root containers must set `uid`/`gid` explicitly.** The CSIDriver
+object sets `fsGroupPolicy: None`, so a pod's `securityContext.fsGroup` has
+no effect on this mount — kubelet never runs its usual chown/chmod pass over
+it. (`fsGroupPolicy: File` isn't an option here: `chmod`/`chown` on these
+files always returns `EPERM`/`ENOTSUP`, since modes and ownership are mount
+attributes, not part of the Secret or ConfigMap, and kubelet treats that
+refusal as a fatal `SetUp` failure — the pod would never start.) With the
+defaults (`uid: 0, gid: 0, fileMode: 0600`), a container running as a
+non-root UID cannot read its own mounted credentials. Set `uid`/`gid` in
+`volumeAttributes` to match the container's `runAsUser`/`runAsGroup`
+instead:
+
+```yaml
+volumeAttributes:
+  objectKind: Secret
+  objectName: oauth-credentials
+  uid: "1000"
+  gid: "1000"
+```
+
 ## Security
 
 **The driver's ServiceAccount holds zero Kubernetes API permissions.** Every

@@ -162,7 +162,7 @@ spec:
   attachRequired: false
   podInfoOnMount: true
   requiresRepublish: true
-  fsGroupPolicy: File
+  fsGroupPolicy: None
   volumeLifecycleModes: ["Ephemeral"]
   tokenRequests:
     - audience: ""
@@ -354,8 +354,15 @@ Taken from mount attributes, **not stored in the object**, so the object
 stays interoperable with kubelet's native projection and with `kubectl
 edit`. `chmod` inside the pod returns `EPERM`.
 
-Defaults: `fileMode: 0600`, `dirMode: 0700`, `uid: 0`, `gid: 0`. Combined
-with `fsGroupPolicy: File`, kubelet applies the pod's `fsGroup`.
+Defaults: `fileMode: 0600`, `dirMode: 0700`, `uid: 0`, `gid: 0`.
+`fsGroupPolicy: None` — kubelet never runs `SetVolumeOwnership` against this
+mount. `File.Setattr` correctly returns `EPERM` for UID and GID changes
+(modes come from mount attributes, not the object), and `Root` implements no
+`NodeSetattrer` at all, so a `fsGroup` chown attempt would return `ENOTSUP`
+on the mount root and fail the pod's `SetUp` outright — `None` is what keeps
+a pod that sets `fsGroup` schedulable at all. A non-root container that needs
+to read its own credentials must set `uid`/`gid` in `volumeAttributes` to
+match, since there is no `fsGroup`-driven fallback.
 
 ## Read path and consistency
 
