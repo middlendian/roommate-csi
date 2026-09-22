@@ -43,6 +43,12 @@ type Live struct {
 	// Token holds the most recent pod token. Republish swaps it atomically,
 	// roughly ten times a second, so this must never take a lock the data
 	// path also wants.
+	//
+	// Its address is handed to podtoken.ClientFor at publish time, so this
+	// field IS the Volume's client credential, not a separate copy: a
+	// republish's swapToken write is what the client's transport reads on
+	// its very next request. See node.go publish()'s doc comment on the
+	// live-allocated-early ordering that makes this possible.
 	Token atomic.Pointer[string]
 }
 

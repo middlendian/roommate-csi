@@ -168,7 +168,18 @@ func (n *NodeServer) publish(ctx context.Context, target string, vc map[string]s
 		return status.Errorf(codes.FailedPrecondition,
 			"%v; set tokenRequests on the CSIDriver object", err)
 	}
-	client, err := podtoken.ClientFor(tok)
+
+	// live is allocated now, ahead of the mount it will eventually describe,
+	// so its Token field can double as the client's live credential holder:
+	// podtoken.ClientFor reads the bearer token fresh from this exact
+	// atomic.Pointer on every request, and swapToken (the republish fast
+	// path) writes into this exact pointer too. Without sharing the
+	// storage, a rotated token would be recorded but never actually used —
+	// see podtoken.ClientFor's doc comment.
+	live := &mounts.Live{}
+	live.Token.Store(&tok)
+
+	client, err := podtoken.ClientFor(&live.Token)
 	if err != nil {
 		return status.Errorf(codes.Internal, "build client: %v", err)
 	}
@@ -206,8 +217,8 @@ func (n *NodeServer) publish(ctx context.Context, target string, vc map[string]s
 		return status.Errorf(codes.Internal, "mount fuse: %v", err)
 	}
 
-	live := &mounts.Live{Cancel: cancel, Unmount: server.Unmount}
-	live.Token.Store(&tok)
+	live.Cancel = cancel
+	live.Unmount = server.Unmount
 
 	if err := n.registry.Put(target, live, mounts.Mount{
 		TargetPath: target, ObjectKind: cfg.ObjectKind,

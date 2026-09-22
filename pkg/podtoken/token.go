@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"sync/atomic"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -82,23 +84,58 @@ func PodIdentity(volumeContext map[string]string) (namespace, serviceAccount, ui
 	return namespace, serviceAccount, uid, nil
 }
 
-// ClientFor builds a client authenticated as the pod.
+// ClientFor builds a client authenticated as the pod. holder supplies the
+// bearer token for every outgoing request, read fresh each time via
+// wrapTokenAuth — not baked in once at construction — so a token a later
+// republish swaps into holder (see mounts.Live.Token) takes effect on the
+// very next API call instead of being frozen for the life of the mount.
 //
 // It starts from the in-cluster config for the API server address and CA
 // only, then replaces every credential field. Leaving the driver's own
-// ServiceAccount token in place would silently restore the confused-deputy
-// problem this package exists to prevent.
-func ClientFor(token string) (kubernetes.Interface, error) {
+// ServiceAccount token in place — or its token *file*, which is client-go's
+// only other source of a dynamically-reloaded bearer token — would silently
+// restore the confused-deputy problem this package exists to prevent.
+// BearerToken is left empty so client-go installs no competing bearer
+// round-tripper of its own; wrapTokenAuth's transport is the sole source of
+// the Authorization header from here on.
+func ClientFor(holder *atomic.Pointer[string]) (kubernetes.Interface, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("in-cluster config: %w", err)
 	}
-	cfg.BearerToken = token
+	cfg.BearerToken = ""
 	cfg.BearerTokenFile = ""
 	cfg.Username, cfg.Password = "", ""
 	cfg.CertFile, cfg.KeyFile = "", ""
 	cfg.CertData, cfg.KeyData = nil, nil
 	cfg.AuthProvider = nil
 	cfg.ExecProvider = nil
+	wrapTokenAuth(cfg, holder)
 	return kubernetes.NewForConfig(cfg)
+}
+
+// wrapTokenAuth installs a round tripper on cfg that sets the Authorization
+// header from holder.Load() on every outgoing request. Split out from
+// ClientFor so it can be exercised against a bare *rest.Config pointed at a
+// test server, without needing a real in-cluster environment.
+func wrapTokenAuth(cfg *rest.Config, holder *atomic.Pointer[string]) {
+	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		return &tokenRoundTripper{holder: holder, next: rt}
+	})
+}
+
+// tokenRoundTripper reads holder on every RoundTrip call, so a token swap
+// (atomic.Pointer[string].Store) is visible to the very next request this
+// client sends, not just to clients built after the swap.
+type tokenRoundTripper struct {
+	holder *atomic.Pointer[string]
+	next   http.RoundTripper
+}
+
+func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	if tok := t.holder.Load(); tok != nil && *tok != "" {
+		req.Header.Set("Authorization", "Bearer "+*tok)
+	}
+	return t.next.RoundTrip(req)
 }
