@@ -582,11 +582,16 @@ small `published.json` state file records live targets and tells them apart.
 
 ### Plugin restart
 
-Republish notices a missing mount within ~100ms and rebuilds it. File
-descriptors the pod already held break permanently (`ENOTCONN`) — FUSE
-cannot reattach them. For a file read occasionally that is a non-issue; for
-a pod holding a descriptor open continuously it is not. Documented, not
-solved in v1.
+Republish notices a missing mount within ~100ms and rebuilds the host-side
+FUSE mount at `target_path`. That repairs the mount for any pod created
+*after* the restart. It does **not** repair a pod that was already running:
+kubelet bind-mounts `target_path` into the consumer's mount namespace once,
+at container start, with private propagation, so a fresh host-side mount is
+invisible to that existing bind-mount reference. Every path under the
+volume in that pod returns `ENOTCONN` from then on — not just descriptors
+that were already open, the entire directory view is dead, reopen or not.
+The pod must be deleted and recreated to get a working mount again.
+Documented, not solved in v1.
 
 ## Failure modes
 
@@ -600,7 +605,7 @@ solved in v1.
 | Object exceeds ~1 MiB | `ENOSPC` at write time, not an opaque API rejection |
 | Object deleted underneath | reads serve last snapshot; writes fail; logged loudly |
 | Lease renewal lost mid-hold | commit refused with `EIO` |
-| Node plugin restart | remount within ~100ms; open descriptors break |
+| Node plugin restart | new mounts remount within ~100ms; existing consumer pods get `ENOTCONN` and must be recreated |
 
 ## Configuration
 
@@ -697,7 +702,10 @@ Stated in the README, not discovered later:
 - **~1 MiB ceiling**, inherited from etcd.
 - **Flat namespace.** No subdirectories.
 - **`chmod` returns `EPERM`.** Modes come from mount attributes.
-- **Open descriptors break across a node-plugin restart.**
+- **A node-plugin restart requires existing consumer pods to be recreated.**
+  New mounts recover within ~100ms; kubelet's private-propagation
+  bind-mount means an already-running pod's view cannot be repaired in
+  place.
 
 ## inotify
 

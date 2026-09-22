@@ -276,11 +276,16 @@ Stated here rather than discovered later:
 - **`chmod` returns `EPERM`.** File and directory modes come from mount
   attributes, not from the object, so they stay interoperable with
   kubelet's native projection and `kubectl edit`.
-- **Open file descriptors break across a node-plugin restart.** The plugin
-  notices a missing mount within about 100ms of a republish and rebuilds it,
-  but FUSE cannot reattach descriptors a pod already had open — they fail
-  with `ENOTCONN` from that point on. Fine for a file reopened occasionally;
-  not fine for one held open continuously across a restart.
+- **A node-plugin restart requires existing consumer pods to be recreated.**
+  kubelet bind-mounts the CSI `target_path` into a consuming container's
+  mount namespace once, at container start, with private propagation. A
+  node-plugin restart tears down and rebuilds the host-side FUSE mount at
+  that same path within about 100ms — but the already-running pod's
+  bind-mount reference does not see the replacement; the driver cannot
+  repair it in place. Every path in that pod's view of the volume returns
+  `ENOTCONN` from that point on, reopen or not, and the pod must be deleted
+  and recreated to get a working mount again. Only *new* mounts (a pod
+  created after the restart) recover automatically, within ~100ms.
 - **Inline ephemeral volumes only.** No `PersistentVolume`, no
   `PersistentVolumeClaim`, no `StorageClass`, no dynamic provisioning, and no
   controller service — the driver never creates or deletes the backing
