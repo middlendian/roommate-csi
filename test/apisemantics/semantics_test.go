@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,11 +18,14 @@ import (
 	coordv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/yaml"
 
+	"github.com/middlendian/roommate-csi/pkg/driver"
 	"github.com/middlendian/roommate-csi/pkg/objectfs"
 )
 
@@ -343,4 +347,224 @@ func TestLeaseManagerCASRejectsStaleWriter(t *testing.T) {
 			t.Fatalf("round %d: release winner: %v", i, err)
 		}
 	}
+}
+
+// CLAIM 6: driver.RBACHint's emitted Role and RoleBinding, applied to a
+// real API server exactly as they are rendered for a human to
+// kubectl-apply, actually authorize every driver operation they claim to —
+// and can tell a working Role apart from a broken one.
+//
+// pkg/driver/rbachint_test.go asserts the emitted *text* contains expected
+// substrings. That is exactly how the create-scoped-by-resourceNames bug
+// shipped: RBAC cannot restrict a create request by resourceNames (a
+// create request's authorization attributes carry no object name — the
+// name in the request body isn't consulted), so a leases rule that grants
+// "create" alongside a resourceNames list silently denies every create.
+// The substring text still "looked right" the whole time; only a real
+// authorization decision can see the difference.
+func TestRBACHintAuthorizesRealAPIOperations(t *testing.T) {
+	admin, ns := setup(t)
+	ctx := context.Background()
+
+	const (
+		objectName     = "oauth-credentials"
+		leaseName      = "roommate-oauth-credentials"
+		serviceAccount = "session-runner"
+	)
+
+	if _, err := admin.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: objectName},
+		Data:       map[string][]byte{"session.key": []byte("v1")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create secret: %v", err)
+	}
+	if _, err := admin.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create serviceaccount: %v", err)
+	}
+
+	hint := driver.RBACHint(ns, serviceAccount, "Secret", objectName, leaseName)
+	role, binding := parseRBACHint(t, hint)
+
+	if _, err := admin.RbacV1().Roles(ns).Create(ctx, role, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create Role parsed from RBACHint: %v", err)
+	}
+	if _, err := admin.RbacV1().RoleBindings(ns).Create(ctx, binding, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create RoleBinding parsed from RBACHint: %v", err)
+	}
+
+	scoped, err := kubernetes.NewForConfig(impersonateServiceAccount(ns, serviceAccount))
+	if err != nil {
+		t.Fatalf("impersonated client: %v", err)
+	}
+
+	// Drive the actual driver operations under the impersonated identity —
+	// not synthetic calls, the same Store/LeaseManager code paths
+	// production uses.
+	store := objectfs.NewSecretStore(scoped, ns, objectName)
+	if _, err := store.Get(ctx); err != nil {
+		t.Fatalf("store.Get under RBACHint's Role: %v", err)
+	}
+
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	w, err := store.Watch(wctx, "") // Watch always carries the metadata.name field selector (CLAIM 4).
+	if err != nil {
+		t.Fatalf("store.Watch under RBACHint's Role: %v", err)
+	}
+	w.Stop()
+
+	if err := store.Patch(ctx, map[string][]byte{"session.key": []byte("v2")}, nil); err != nil {
+		t.Fatalf("store.Patch under RBACHint's Role: %v", err)
+	}
+
+	// The Lease does not exist yet, so this forces LeaseManager down the
+	// create path — the path the resourceNames bug was in.
+	lm := objectfs.NewLeaseManager(scoped, ns, leaseName, "pod-a:1", objectfs.DefaultLeaseDuration)
+	ok, err := lm.TryAcquire(ctx)
+	if err != nil {
+		t.Fatalf("LeaseManager.TryAcquire (create path) under RBACHint's Role: %v", err)
+	}
+	if !ok {
+		t.Fatal("LeaseManager.TryAcquire = false under RBACHint's Role; want true")
+	}
+	if err := lm.Release(ctx); err != nil {
+		t.Fatalf("LeaseManager.Release under RBACHint's Role: %v", err)
+	}
+
+	// Falsification half: without this, the test above only proves *some*
+	// Role authorizes these operations, not that it can distinguish a
+	// working Role from the exact broken shape that shipped once already.
+	// Build a Role identical to the emitted one except its leases "create"
+	// rule is (wrongly) scoped by resourceNames, exactly like the real
+	// regression, and confirm it does NOT authorize the create.
+	brokenLease := "roommate-broken-lease"
+	brokenRole := role.DeepCopy()
+	brokenRole.Name = "roommate-broken"
+	sawCreateRule := false
+	for i, r := range brokenRole.Rules {
+		switch {
+		case hasAPIGroup(r, "coordination.k8s.io") && hasVerb(r, "create"):
+			// The bug under test: scope the create rule by resourceNames.
+			brokenRole.Rules[i].ResourceNames = []string{brokenLease}
+			sawCreateRule = true
+		case hasAPIGroup(r, "coordination.k8s.io") && hasVerb(r, "get"):
+			// Keep get/update correctly scoped to brokenLease, so the
+			// initial Get is authorized and returns a genuine NotFound —
+			// isolating the create verb as the only thing under test.
+			brokenRole.Rules[i].ResourceNames = []string{brokenLease}
+		}
+	}
+	if !sawCreateRule {
+		t.Fatal("RBACHint's Role has no unscoped leases \"create\" rule to break; " +
+			"test no longer matches the hint's shape")
+	}
+
+	const brokenServiceAccount = "broken-session-runner"
+	if _, err := admin.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: brokenServiceAccount},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create broken serviceaccount: %v", err)
+	}
+	if _, err := admin.RbacV1().Roles(ns).Create(ctx, brokenRole, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create broken Role: %v", err)
+	}
+	brokenBinding := binding.DeepCopy()
+	brokenBinding.Name = "roommate-broken-binding"
+	brokenBinding.RoleRef.Name = brokenRole.Name
+	brokenBinding.Subjects = []rbacv1.Subject{{
+		Kind: rbacv1.ServiceAccountKind, Name: brokenServiceAccount, Namespace: ns,
+	}}
+	if _, err := admin.RbacV1().RoleBindings(ns).Create(ctx, brokenBinding, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create broken RoleBinding: %v", err)
+	}
+
+	brokenScoped, err := kubernetes.NewForConfig(impersonateServiceAccount(ns, brokenServiceAccount))
+	if err != nil {
+		t.Fatalf("broken impersonated client: %v", err)
+	}
+	brokenLM := objectfs.NewLeaseManager(brokenScoped, ns, brokenLease, "pod-a:1", objectfs.DefaultLeaseDuration)
+	if ok, err := brokenLM.TryAcquire(ctx); err == nil || !apierrors.IsForbidden(err) {
+		t.Fatalf("TryAcquire under a Role whose leases \"create\" rule is scoped by resourceNames = "+
+			"%v, %v; want a Forbidden error — RBAC cannot restrict create by resourceNames, so this "+
+			"rule must deny the create exactly like the real bug did, proving this test can tell a "+
+			"working Role from a broken one", ok, err)
+	}
+}
+
+func hasAPIGroup(r rbacv1.PolicyRule, group string) bool {
+	for _, g := range r.APIGroups {
+		if g == group {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVerb(r rbacv1.PolicyRule, verb string) bool {
+	for _, v := range r.Verbs {
+		if v == verb {
+			return true
+		}
+	}
+	return false
+}
+
+// impersonateServiceAccount returns a client config that authenticates as
+// the given ServiceAccount, the way the RBAC authorizer's subject matching
+// for a RoleBinding's ServiceAccount subject expects: by the exact username
+// "system:serviceaccount:<namespace>:<name>".
+func impersonateServiceAccount(ns, name string) *rest.Config {
+	c := *cfg
+	c.Impersonate = rest.ImpersonationConfig{
+		UserName: fmt.Sprintf("system:serviceaccount:%s:%s", ns, name),
+		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:" + ns, "system:authenticated"},
+	}
+	return &c
+}
+
+// parseRBACHint parses driver.RBACHint's emitted text as real YAML and
+// returns the Role and RoleBinding it contains. The hint is formatted for a
+// human running kubectl apply — a prose preamble, a "---"-separated Role
+// and RoleBinding, and an inline comment ahead of the RoleBinding — not
+// just the two bare objects. Parsing the actual emitted text, rather than
+// hand-constructing equivalent rules, is deliberate: drift between what the
+// driver prints and what this test applies would defeat the point of
+// testing against real authorization at all.
+func parseRBACHint(t *testing.T, hint string) (*rbacv1.Role, *rbacv1.RoleBinding) {
+	t.Helper()
+	var role *rbacv1.Role
+	var binding *rbacv1.RoleBinding
+	for _, doc := range strings.Split(hint, "\n---\n") {
+		doc = strings.TrimSpace(doc)
+		if doc == "" {
+			continue
+		}
+		var head struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &head); err != nil {
+			continue // the prose preamble isn't YAML at all
+		}
+		switch head.Kind {
+		case "Role":
+			role = &rbacv1.Role{}
+			if err := yaml.Unmarshal([]byte(doc), role); err != nil {
+				t.Fatalf("parse Role from RBACHint: %v\n%s", err, doc)
+			}
+		case "RoleBinding":
+			binding = &rbacv1.RoleBinding{}
+			if err := yaml.Unmarshal([]byte(doc), binding); err != nil {
+				t.Fatalf("parse RoleBinding from RBACHint: %v\n%s", err, doc)
+			}
+		}
+	}
+	if role == nil {
+		t.Fatalf("RBACHint emitted no parseable Role:\n%s", hint)
+	}
+	if binding == nil {
+		t.Fatalf("RBACHint emitted no parseable RoleBinding:\n%s", hint)
+	}
+	return role, binding
 }
