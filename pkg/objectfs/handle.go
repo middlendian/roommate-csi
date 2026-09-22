@@ -257,7 +257,15 @@ func (h *handle) setlk(ctx context.Context, lk *fuse.FileLock, flags uint32, blo
 	// someone already refresh?" and get a truthful answer, rather than a
 	// possibly-stale cached view that predates the write the lock was meant
 	// to serialise against.
-	if _, err := h.vol.Cache.Fresh(ctx); err != nil {
+	//
+	// The returned snapshot, not a later Cache.Current() re-read, is what
+	// gets pinned below: the watch loop runs concurrently and can install a
+	// newer *or* — before setFromWatch's ordering guard — an out-of-order
+	// older event between this call returning and a subsequent Current()
+	// call, which would silently discard the very quorum read this comment
+	// is describing. Re-reading Current() here was exactly that TOCTOU.
+	snap, err := h.vol.Cache.Fresh(ctx)
+	if err != nil {
 		_ = lease.Release(ctx)
 		return errnoFor(err)
 	}
@@ -273,7 +281,7 @@ func (h *handle) setlk(ctx context.Context, lk *fuse.FileLock, flags uint32, blo
 		h.mu.Unlock()
 		return 0
 	}
-	if snap := h.vol.Cache.Current(); snap != nil {
+	if snap != nil {
 		h.snap = snap
 		if value, ok := snap.Get(h.key); ok {
 			h.buf = value

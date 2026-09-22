@@ -76,6 +76,59 @@ func mountForTestWithClient(t *testing.T, data map[string][]byte, client kuberne
 	return dir, vol
 }
 
+// mountForTestWithWatch is mountForTest but also runs the Volume's watch
+// loop (vol.Run) for the lifetime of the test, stopped by t.Cleanup.
+//
+// Every other helper in this file builds the Volume as a struct literal and
+// never calls Run, so nothing exercises Cache reads (Fresh, MaybeFresh, and
+// in particular a lock's mandatory quorum read in setlk) running
+// concurrently with live watch delivery on the very same Cache — which is
+// exactly the concurrency C2 (the watch clobbering a fresher quorum read)
+// depends on. The returned *recordingStore exposes setSnap/watchCh so a
+// test can advance the backing "server" state and then inject an
+// out-of-order watch event to prove the ordering guard holds.
+func mountForTestWithWatch(t *testing.T, data map[string][]byte) (string, *Volume, *recordingStore) {
+	t.Helper()
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		t.Skip("/dev/fuse unavailable; skipping FUSE test")
+	}
+
+	store := newRecordingStore(data)
+	cfg := Config{
+		Namespace: "my-app", ObjectKind: KindSecret, ObjectName: "oauth-credentials",
+		LeaseName: "roommate-oauth-credentials",
+		FileMode:  0o600, DirMode: 0o700,
+		StalenessBound: time.Hour, LeaseDuration: testLeaseDur,
+	}
+	cache := NewCache(store, cfg.StalenessBound)
+	if _, err := cache.Fresh(context.Background()); err != nil {
+		t.Fatalf("warm cache: %v", err)
+	}
+	vol := &Volume{
+		Cfg: cfg, Store: store, Cache: cache,
+		Committer: NewCommitter(store, cache),
+		client:    fake.NewSimpleClientset(),
+		podUID:    "test-pod-uid",
+	}
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	go vol.Run(watchCtx)
+	t.Cleanup(cancel)
+
+	dir := t.TempDir()
+	srv, err := Mount(dir, vol)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := srv.Unmount(); err != nil {
+			t.Logf("unmount: %v", err)
+		}
+	})
+	waitMounted(t, srv)
+	return dir, vol, store
+}
+
 func waitMounted(t *testing.T, srv *fuse.Server) {
 	t.Helper()
 	done := make(chan error, 1)

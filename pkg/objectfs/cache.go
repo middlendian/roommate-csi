@@ -2,6 +2,7 @@ package objectfs
 
 import (
 	"context"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -54,13 +55,52 @@ func (c *Cache) Current() *Snapshot {
 	return e.snap
 }
 
-// Set installs snap as current. Called after a successful write so the
-// writing node reads its own writes without a round trip.
+// Set installs snap as current, unconditionally, with no ordering check
+// against whatever is already cached.
+//
+// This is safe — and required — for exactly two callers: Fresh, whose
+// quorum GET is by definition authoritative regardless of anything a lagging
+// watch might deliver later, and Commit, whose locally-derived Snapshot
+// (Snapshot.With) deliberately carries an empty ResourceVersion (see ruling
+// R4) precisely so it is never mistaken for a versioned server response.
+// Every other caller — in particular the watch loop — must go through
+// setFromWatch instead, or a stale event can silently replace a newer read.
 func (c *Cache) Set(snap *Snapshot) {
 	if snap == nil {
 		return
 	}
 	c.cur.Store(&entry{snap: snap, lastSync: time.Now()})
+}
+
+// setFromWatch installs snap as current unless its ResourceVersion is not
+// newer than what's already cached, in which case it is dropped.
+//
+// Without this, a watch event that arrives late relative to a concurrent
+// quorum read (Fresh) can silently overwrite the fresher result:
+// client-go's StreamWatcher decodes off an unbuffered channel behind an HTTP
+// read buffer, so one event of lag behind a Get is routine, not exotic. That
+// is exactly the shape of C2 — a Lease-guarded Fresh observes a just-landed
+// refresh, and a queued, older watch event then clobbers it a moment later,
+// handing the next reader stale, already-revoked-token content.
+//
+// ResourceVersion is an opaque string per the API contract, but in every
+// real Kubernetes implementation it parses as a monotonically increasing
+// uint64, which is what makes "newer" decidable at all here. If either side
+// fails to parse — a snapshot from a fake/test store not using genuine RVs,
+// say — install unconditionally rather than guess: refusing to make a
+// disprovable ordering call is safer than dropping a legitimate update.
+func (c *Cache) setFromWatch(snap *Snapshot) {
+	if snap == nil {
+		return
+	}
+	if cur := c.cur.Load(); cur != nil && cur.snap != nil {
+		curRV, curErr := strconv.ParseUint(cur.snap.ResourceVersion, 10, 64)
+		newRV, newErr := strconv.ParseUint(snap.ResourceVersion, 10, 64)
+		if curErr == nil && newErr == nil && newRV <= curRV {
+			return // stale relative to what's cached; drop it
+		}
+	}
+	c.Set(snap)
 }
 
 // Fresh performs a quorum read and installs the result. This is the
@@ -163,7 +203,7 @@ func (c *Cache) watchOnce(ctx context.Context, sinceRV string) watchOutcome {
 			switch ev.Type {
 			case watch.Added, watch.Modified:
 				if snap, err := c.store.Decode(ev.Object); err == nil {
-					c.Set(snap)
+					c.setFromWatch(snap)
 				}
 			case watch.Deleted:
 				// Keep serving the last snapshot; writes will fail loudly.

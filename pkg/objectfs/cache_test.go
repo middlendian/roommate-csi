@@ -24,6 +24,13 @@ type stubStore struct {
 	// watchCalls counts Watch invocations so tests can assert reconnect
 	// attempts are throttled rather than unbounded.
 	watchCalls int
+
+	// decodes counts Decode invocations, which happen once per watch event
+	// actually pulled off the result channel and processed by watchOnce.
+	// Tests use this to wait until an injected event has definitely been
+	// handled — including, deliberately, one the ordering guard then drops
+	// — rather than sleeping and hoping the goroutine got scheduled in time.
+	decodes int
 }
 
 func newStubStore(data map[string][]byte) *stubStore {
@@ -81,7 +88,16 @@ func (s *stubStore) watchCallCount() int {
 }
 
 func (s *stubStore) Decode(obj runtime.Object) (*Snapshot, error) {
+	s.mu.Lock()
+	s.decodes++
+	s.mu.Unlock()
 	return obj.(*snapObject).snap, nil
+}
+
+func (s *stubStore) decodeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.decodes
 }
 
 func (s *stubStore) Patch(context.Context, map[string][]byte, []string) error { return nil }
@@ -219,6 +235,77 @@ func TestCacheRunBacksOffOnWatchEstablishFailure(t *testing.T) {
 
 	if got := s.watchCallCount(); got > 10 {
 		t.Fatalf("Watch called %d times in 300ms with a failing watch — want a bounded, backed-off retry count", got)
+	}
+}
+
+// TestCacheSetFromWatchDropsStaleResourceVersion is C2's core regression
+// guard: Set(RV52) then Set(RV51) through the watch path must leave RV52
+// installed. Before the fix, watchOnce called the unconditional Set for
+// every watch event, so a quorum read (Fresh) at RV52 followed by a
+// late-arriving RV51 watch event — one event of lag behind a client-go
+// StreamWatcher is routine, not exotic — would silently clobber the fresher
+// value with older content. That is the exact mechanism a lock holder's
+// mandatory quorum read exists to prevent.
+func TestCacheSetFromWatchDropsStaleResourceVersion(t *testing.T) {
+	s := newStubStore(map[string][]byte{"session.key": []byte("REFRESHED")})
+	c := NewCache(s, time.Hour)
+
+	c.setFromWatch(&Snapshot{
+		Data: map[string][]byte{"session.key": []byte("REFRESHED")}, ResourceVersion: "52",
+	})
+	c.setFromWatch(&Snapshot{
+		Data: map[string][]byte{"session.key": []byte("EXPIRED")}, ResourceVersion: "51",
+	})
+
+	cur := c.Current()
+	if cur.ResourceVersion != "52" {
+		t.Fatalf("ResourceVersion = %q, want 52 — an older watch event must not replace a newer snapshot", cur.ResourceVersion)
+	}
+	if v, _ := cur.Get("session.key"); string(v) != "REFRESHED" {
+		t.Fatalf("session.key = %q, want REFRESHED", v)
+	}
+}
+
+// Equal ResourceVersions (a redelivered or duplicate event) must also not
+// displace the current entry — "<=", not "<".
+func TestCacheSetFromWatchDropsEqualResourceVersion(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	c := NewCache(s, time.Hour)
+
+	first := &Snapshot{Data: map[string][]byte{"a": []byte("first")}, ResourceVersion: "10"}
+	c.setFromWatch(first)
+	c.setFromWatch(&Snapshot{Data: map[string][]byte{"a": []byte("second")}, ResourceVersion: "10"})
+
+	if v, _ := c.Current().Get("a"); string(v) != "first" {
+		t.Fatalf("a = %q, want first — a same-RV event must not displace the current entry", v)
+	}
+}
+
+// A newer ResourceVersion must still install normally.
+func TestCacheSetFromWatchAppliesNewerResourceVersion(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	c := NewCache(s, time.Hour)
+
+	c.setFromWatch(&Snapshot{Data: map[string][]byte{"a": []byte("old")}, ResourceVersion: "10"})
+	c.setFromWatch(&Snapshot{Data: map[string][]byte{"a": []byte("new")}, ResourceVersion: "11"})
+
+	if v, _ := c.Current().Get("a"); string(v) != "new" {
+		t.Fatalf("a = %q, want new", v)
+	}
+}
+
+// An unparsable ResourceVersion on either side must install rather than
+// silently drop: refusing to make a disprovable ordering call is safer than
+// discarding a legitimate update.
+func TestCacheSetFromWatchInstallsOnUnparsableResourceVersion(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	c := NewCache(s, time.Hour)
+
+	c.setFromWatch(&Snapshot{Data: map[string][]byte{"a": []byte("first")}, ResourceVersion: "not-a-number"})
+	c.setFromWatch(&Snapshot{Data: map[string][]byte{"a": []byte("second")}, ResourceVersion: "not-a-number-either"})
+
+	if v, _ := c.Current().Get("a"); string(v) != "second" {
+		t.Fatalf("a = %q, want second — unparsable RVs must not block installation", v)
 	}
 }
 

@@ -3,6 +3,7 @@ package objectfs
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,10 +13,19 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 )
 
+// TestFlockExclusiveAcquiresLease proves the lock's mandatory quorum read is
+// not just called but load-bearing: a newly opened fd — the real
+// `flock file -c 'cat file'` shape a consumer actually uses — must observe
+// a value the store gained between the first Open and the Flock call.
+// Asserting only store.getCount() >= 2 (the previous shape of this test)
+// proves a quorum read *happened*, but not that its result is what a
+// consumer then reads; it would keep passing even if setlk discarded the
+// fresh snapshot entirely and every reader kept observing pre-lock content.
 func TestFlockExclusiveAcquiresLease(t *testing.T) {
 	dir, vol := mountForTest(t, map[string][]byte{"session.key": []byte("v1")})
 	store := vol.Store.(*recordingStore)
@@ -26,6 +36,11 @@ func TestFlockExclusiveAcquiresLease(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
+	// The store gains a new value after this handle's Open pinned "v1" —
+	// simulating another writer's refresh landing while a long-lived fd is
+	// already open, exactly the shape flock(1)'s subshell reopens around.
+	store.setSnap(&Snapshot{Data: map[string][]byte{"session.key": []byte("v2")}, ResourceVersion: "2"})
+
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatalf("Flock: %v", err)
 	}
@@ -34,6 +49,20 @@ func TestFlockExclusiveAcquiresLease(t *testing.T) {
 	// is the entire read-after-write guarantee.
 	if store.getCount() < 2 {
 		t.Fatalf("gets = %d; acquiring the lock must force a fresh quorum read", store.getCount())
+	}
+
+	g, err := os.Open(filepath.Join(dir, "session.key"))
+	if err != nil {
+		t.Fatalf("Open after lock: %v", err)
+	}
+	defer func() { _ = g.Close() }()
+	got, err := io.ReadAll(g)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "v2" {
+		t.Fatalf("content after lock = %q, want v2 — the lock's mandatory fresh read must be "+
+			"what a subsequent reader actually observes, not just a call that happened", got)
 	}
 
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
@@ -349,6 +378,76 @@ func TestFlockBlockingSurfacesRealErrorsAsIO(t *testing.T) {
 // concurrent_publish_test.go). Pre-cancelling ctx and forcing Acquire's
 // retry loop to observe it via sleepCtx exercises the identical code path
 // — lease.Acquire failing because ctx is Done — without that flakiness.
+// TestSetlkSurvivesLateWatchEvent is C2's end-to-end regression guard, run
+// against a real FUSE mount with the watch loop actually running
+// concurrently (mountForTestWithWatch) — the concurrency no other test in
+// this file exercises. A flock's mandatory quorum read observes another
+// node's already-landed refresh; a stale, lower-ResourceVersion watch event
+// delivered immediately afterward — one event of lag behind a client-go
+// StreamWatcher is routine, not exotic — must not clobber it. Before the
+// fix, watchOnce's unconditional Set meant it would: a later `cat` (a fresh
+// Open, the real flock-then-cat shape) would observe the older, already
+// consumed-and-revoked credential instead of the refresh the lock was
+// supposed to guarantee visible.
+func TestSetlkSurvivesLateWatchEvent(t *testing.T) {
+	dir, vol, store := mountForTestWithWatch(t, map[string][]byte{"session.key": []byte("EXPIRED")})
+	path := filepath.Join(dir, "session.key")
+
+	// Simulate another node's Lease-guarded refresh landing at RV52 — this
+	// is what the flock below's mandatory quorum read (Cache.Fresh) will
+	// observe.
+	store.setSnap(&Snapshot{
+		Data:            map[string][]byte{"session.key": []byte("REFRESHED")},
+		ResourceVersion: "52",
+	})
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("Flock: %v", err)
+	}
+	if got := vol.Cache.Current(); got == nil || got.ResourceVersion != "52" {
+		t.Fatalf("cache after lock = %+v, want ResourceVersion 52", got)
+	}
+
+	// Inject a watch event carrying OLDER content at a LOWER
+	// ResourceVersion, exactly as if a lagging StreamWatcher delivered it
+	// right after the quorum read above landed.
+	before := store.decodeCount()
+	store.watchCh <- watch.Event{Type: watch.Modified, Object: &snapObject{snap: &Snapshot{
+		Data:            map[string][]byte{"session.key": []byte("EXPIRED")},
+		ResourceVersion: "51",
+	}}}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for store.decodeCount() <= before {
+		if time.Now().After(deadline) {
+			t.Fatal("watch loop never processed the injected event")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A newly-opened fd — the real `flock file -c 'cat file'` shape — must
+	// still see the fresher value: the stale watch event must have been
+	// dropped, not applied.
+	g, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open after watch event: %v", err)
+	}
+	defer func() { _ = g.Close() }()
+	got, err := io.ReadAll(g)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "REFRESHED" {
+		t.Fatalf("content = %q, want REFRESHED — a stale watch event clobbered the fresh quorum read", got)
+	}
+}
+
 func TestSetlkBlockingReturnsEINTROnlyWhenCtxCancelled(t *testing.T) {
 	store := newStubStore(map[string][]byte{"session.key": []byte("v1")})
 	cache := NewCache(store, time.Hour)

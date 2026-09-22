@@ -69,4 +69,14 @@ func TestSnapshotWith(t *testing.T) {
 	if got, _ := s.Get("a"); string(got) != "one" {
 		t.Errorf("original mutated: a = %q", got)
 	}
+	// ResourceVersion must be cleared: With's result does not correspond to
+	// any version the API server has seen, and Cache.Commit relies on that
+	// to route this snapshot through the unconditional Set rather than
+	// setFromWatch's ResourceVersion-ordering guard (which would otherwise
+	// compare against an empty string via strconv.ParseUint, fail to parse,
+	// and — while currently falling safely open — is not the code path an
+	// empty RV is supposed to travel at all).
+	if next.ResourceVersion != "" {
+		t.Errorf("ResourceVersion = %q, want empty", next.ResourceVersion)
+	}
 }
