@@ -1,0 +1,21 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: roommate-node-critical
+# The reserved system-node-critical (2000001000) and system-cluster-critical
+# (2000000000) classes are what a node-critical DaemonSet would normally
+# use, but the API server rejects them for any pod not created in the
+# kube-system namespace — and this DaemonSet runs in roommate-system.
+# 1000000000 sits safely below both while still outranking essentially
+# every ordinary application pod, so the driver is not the node's first
+# eviction candidate under memory pressure.
+#
+# globalDefault and description are deliberately omitted, not just left at
+# their zero values: `kubectl kustomize` corrupts this object when
+# daemonset.yaml's priorityClassName reference is present elsewhere in the
+# same kustomization — its nameReference transformer round-trips a
+# PriorityClass through a representation that silently drops any field
+# beyond metadata.name and value. Confirmed empirically against kustomize
+# v5.8.1 (bundled with kubectl v1.37.0); keep this resource to exactly
+# these fields.
+value: 1000000000

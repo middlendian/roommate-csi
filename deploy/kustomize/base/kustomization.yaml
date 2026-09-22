@@ -5,6 +5,7 @@ resources:
   - rbac.yaml
   - roommate-user-clusterrole.yaml
   - csidriver.yaml
+  - priorityclass.yaml
   - daemonset.yaml
 images:
   - name: ghcr.io/middlendian/roommate-csi

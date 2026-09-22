@@ -13,12 +13,32 @@ spec:
     spec:
       serviceAccountName: roommate-node
       hostNetwork: false
+      # Every consuming pod's open mount depends on this DaemonSet staying
+      # up — losing it breaks every open descriptor (README) and, absent
+      # the C3 fix, used to break every mount irrecoverably. Being the
+      # node's first eviction candidate under memory pressure (the BestEffort
+      # QoS class an unset resources block implies) is the wrong posture for
+      # that. The reserved system-node-critical class would be the obvious
+      # choice, but the API server only permits it for pods created in the
+      # kube-system namespace — this DaemonSet runs in roommate-system — so
+      # priorityclass.yaml defines a dedicated class instead, ranked just
+      # below the two reserved ones.
+      priorityClassName: roommate-node-critical
+      # No tolerations at all meant this DaemonSet was absent from any node
+      # carrying a taint — including control-plane/master nodes on a
+      # single-node cluster — so the driver silently wasn't there to serve
+      # pods scheduled on it. A blanket Exists toleration matches how other
+      # node-level DaemonSets (kube-proxy, CNI) schedule everywhere.
+      tolerations:
+        - operator: Exists
       containers:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
           args:
             - --csi-address=/csi/csi.sock
             - --kubelet-registration-path=/var/lib/kubelet/plugins/roommate.csi/csi.sock
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
           volumeMounts:
             - {name: socket-dir, mountPath: /csi}
             - {name: registration-dir, mountPath: /registration}
@@ -37,6 +57,8 @@ spec:
             # Note what this does NOT imply: the ServiceAccount still holds no
             # Kubernetes API permissions at all.
             privileged: true
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
           volumeMounts:
             - {name: socket-dir, mountPath: /csi}
             - name: kubelet-dir
