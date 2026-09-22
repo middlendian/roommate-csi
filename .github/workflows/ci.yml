@@ -27,8 +27,15 @@ jobs:
       - name: go build ./...
         run: go build ./...
       - name: api semantics (envtest)
+        # setup-envtest is released as its own module starting at v0.24.0,
+        # whose go.mod requires go >= 1.26 — incompatible with the go 1.25
+        # toolchain this repo (and the k8s.io libs pinned at v0.35.7) builds
+        # with. @latest resolves to that incompatible line and fails under
+        # actions/setup-go's GOTOOLCHAIN=local. Pin instead to a resolved
+        # commit off the release-0.23 branch, which predates the module
+        # split's go1.26 bump and still builds under go 1.25.
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260305142021-f9589b9f2b9d
           make envtest
 
   image:
