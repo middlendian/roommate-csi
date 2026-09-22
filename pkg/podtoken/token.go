@@ -28,7 +28,7 @@ const (
 	// KeyPodUID is the volume context key for the pod's UID.
 	KeyPodUID = "csi.storage.k8s.io/pod.uid"
 	// KeyPodServiceAcct is the volume context key for the pod's service account.
-	KeyPodServiceAcct = "csi.storage.k8s.io/pod.service-account.name"
+	KeyPodServiceAcct = "csi.storage.k8s.io/serviceAccount.name"
 )
 
 // ErrNoToken means kubelet supplied no usable token, which almost always

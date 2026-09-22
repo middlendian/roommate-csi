@@ -5,7 +5,7 @@ metadata:
 spec:
   # No controller service exists, so nothing to attach.
   attachRequired: false
-  # Supplies pod.namespace, pod.name, pod.uid and pod.service-account.name to
+  # Supplies pod.namespace, pod.name, pod.uid and serviceAccount.name to
   # NodePublishVolume. The namespace comes from here and never from
   # volumeAttributes.
   podInfoOnMount: true

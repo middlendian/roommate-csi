@@ -524,9 +524,9 @@ FIRST publish for a target_path
   volumeContext:
     objectKind = Secret
     objectName = oauth-credentials
-    csi.storage.k8s.io/pod.namespace            = my-app
-    csi.storage.k8s.io/pod.service-account.name = session-runner
-    csi.storage.k8s.io/serviceAccount.tokens    = {"": {token, expiry}}
+    csi.storage.k8s.io/pod.namespace         = my-app
+    csi.storage.k8s.io/serviceAccount.name   = session-runner
+    csi.storage.k8s.io/serviceAccount.tokens = {"": {token, expiry}}
 
   1. build rest.Config with BearerToken = the pod's token
   2. quorum GET      403 -> PermissionDenied carrying copy-pasteable RBAC

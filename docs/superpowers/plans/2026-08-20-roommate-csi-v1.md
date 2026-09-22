@@ -2401,7 +2401,7 @@ const (
 	KeyPodNamespace   = "csi.storage.k8s.io/pod.namespace"
 	KeyPodName        = "csi.storage.k8s.io/pod.name"
 	KeyPodUID         = "csi.storage.k8s.io/pod.uid"
-	KeyPodServiceAcct = "csi.storage.k8s.io/pod.service-account.name"
+	KeyPodServiceAcct = "csi.storage.k8s.io/serviceAccount.name"
 )
 
 // ErrNoToken means kubelet supplied no usable token, which almost always
@@ -4600,7 +4600,7 @@ func TestNodePublishFirstPublishErrorsWithoutToken(t *testing.T) {
 			"csi.storage.k8s.io/pod.namespace":            "my-app",
 			"csi.storage.k8s.io/pod.name":                 "p",
 			"csi.storage.k8s.io/pod.uid":                  "uid",
-			"csi.storage.k8s.io/pod.service-account.name": "session-runner",
+			"csi.storage.k8s.io/serviceAccount.name":      "session-runner",
 			"objectKind": "Secret",
 			"objectName": "oauth-credentials",
 		},
@@ -5247,7 +5247,7 @@ metadata:
 spec:
   # No controller service exists, so nothing to attach.
   attachRequired: false
-  # Supplies pod.namespace, pod.name, pod.uid and pod.service-account.name to
+  # Supplies pod.namespace, pod.name, pod.uid and serviceAccount.name to
   # NodePublishVolume. The namespace comes from here and never from
   # volumeAttributes.
   podInfoOnMount: true

@@ -134,13 +134,13 @@ func TestRemountAfterRestartFailureReturnsOK(t *testing.T) {
 		VolumeId:   "v",
 		TargetPath: target,
 		VolumeContext: map[string]string{
-			"csi.storage.k8s.io/ephemeral":                "true",
-			"csi.storage.k8s.io/pod.namespace":            "my-app",
-			"csi.storage.k8s.io/pod.name":                 "p",
-			"csi.storage.k8s.io/pod.uid":                  "uid",
-			"csi.storage.k8s.io/pod.service-account.name": "session-runner",
-			"objectKind": "Secret",
-			"objectName": "oauth-credentials",
+			"csi.storage.k8s.io/ephemeral":           "true",
+			"csi.storage.k8s.io/pod.namespace":       "my-app",
+			"csi.storage.k8s.io/pod.name":            "p",
+			"csi.storage.k8s.io/pod.uid":             "uid",
+			"csi.storage.k8s.io/serviceAccount.name": "session-runner",
+			"objectKind":                             "Secret",
+			"objectName":                             "oauth-credentials",
 		},
 	})
 	if err != nil {
