@@ -140,6 +140,16 @@ func waitForPhase(t *testing.T, c kubernetes.Interface, ns, name string, want co
 		if err == nil && p.Status.Phase == want {
 			return
 		}
+		// A terminal phase other than the one we're waiting for will never
+		// change on its own — fail immediately with diagnostics instead of
+		// burning the rest of the deadline polling a phase that is done
+		// changing. This is what makes a genuine failure (as opposed to a
+		// slow-starting pod) show up with a timestamp close to the actual
+		// event instead of the full timeout later.
+		if err == nil && (p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded) && p.Status.Phase != want {
+			describePod(t, c, ns, name)
+			t.Fatalf("pod %s is %s (terminal), want %s", name, p.Status.Phase, want)
+		}
 		if time.Now().After(deadline) {
 			describePod(t, c, ns, name)
 			t.Fatalf("pod %s never reached %s", name, want)
@@ -148,16 +158,80 @@ func waitForPhase(t *testing.T, c kubernetes.Interface, ns, name string, want co
 	}
 }
 
+// describePod logs everything useful for post-mortem: the pod's events, its
+// container statuses (exit code / reason / message), and both the current
+// and any previous-incarnation container logs, plus the roommate-node
+// driver's own logs from the node the pod ran on. It never fails the test
+// itself — it is called just before a t.Fatalf that already knows why the
+// wait didn't succeed; the point here is *why the pod's own process*
+// didn't reach the expected phase.
 func describePod(t *testing.T, c kubernetes.Interface, ns, name string) {
 	t.Helper()
-	events, err := c.CoreV1().Events(ns).List(context.Background(), metav1.ListOptions{
+	ctx := context.Background()
+
+	events, err := c.CoreV1().Events(ns).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s", name),
 	})
+	if err == nil {
+		for _, e := range events.Items {
+			t.Logf("event %s/%s: %s: %s", e.Type, e.Reason, name, e.Message)
+		}
+	}
+
+	pod, err := c.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
+		t.Logf("describePod: get pod %s: %v", name, err)
 		return
 	}
-	for _, e := range events.Items {
-		t.Logf("event %s/%s: %s: %s", e.Type, e.Reason, name, e.Message)
+	for _, cs := range pod.Status.ContainerStatuses {
+		t.Logf("container %s state: %+v", cs.Name, cs.State)
+		if cs.LastTerminationState.Terminated != nil {
+			t.Logf("container %s last termination: %+v", cs.Name, cs.LastTerminationState.Terminated)
+		}
+	}
+
+	for _, container := range pod.Spec.Containers {
+		if logs, err := getPodLogs(ctx, c, ns, name, container.Name, false); err == nil && logs != "" {
+			t.Logf("logs %s/%s:\n%s", name, container.Name, logs)
+		}
+		if logs, err := getPodLogs(ctx, c, ns, name, container.Name, true); err == nil && logs != "" {
+			t.Logf("previous logs %s/%s:\n%s", name, container.Name, logs)
+		}
+	}
+
+	if pod.Spec.NodeName != "" {
+		dumpDriverLogs(t, c, pod.Spec.NodeName)
+	}
+}
+
+func getPodLogs(ctx context.Context, c kubernetes.Interface, ns, pod, container string, previous bool) (string, error) {
+	req := c.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: container, Previous: previous})
+	raw, err := req.DoRaw(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// dumpDriverLogs logs the roommate-node driver container's output from the
+// DaemonSet pod scheduled on nodeName, so a mount-time failure shows the
+// server side of the story alongside the client-side pod logs above.
+func dumpDriverLogs(t *testing.T, c kubernetes.Interface, nodeName string) {
+	t.Helper()
+	ctx := context.Background()
+	const driverNS = "roommate-system"
+
+	pods, err := c.CoreV1().Pods(driverNS).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=roommate-node",
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
+	})
+	if err != nil || len(pods.Items) == 0 {
+		t.Logf("dumpDriverLogs: no roommate-node pod found on %s: %v", nodeName, err)
+		return
+	}
+	driverPod := pods.Items[0].Name
+	if logs, err := getPodLogs(ctx, c, driverNS, driverPod, "roommate", false); err == nil {
+		t.Logf("driver logs %s (node %s):\n%s", driverPod, nodeName, logs)
 	}
 }
 
