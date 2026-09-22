@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func ctxWithToken(tokens string) map[string]string {
@@ -138,5 +139,55 @@ func TestWrapTokenAuthUsesLatestToken(t *testing.T) {
 	}
 	if got := gotAuth.Load(); got == nil || *got != "Bearer tok-2" {
 		t.Fatalf("Authorization after swap = %v, want Bearer tok-2 — the next request must carry the new token", got)
+	}
+}
+
+// TestClearCredentialsZeroesEveryField guards C1's security half: nothing
+// previously asserted that ClientFor's credential-zeroing block actually
+// clears every field client-go can authenticate with. BearerTokenFile in
+// particular matters most — a reintroduced value is client-go's own
+// dynamically-reloaded bearer-token mechanism, so it would keep working
+// silently, layering the driver's own ServiceAccount identity back on top
+// of wrapTokenAuth's round tripper and collapsing the zero-RBAC model the
+// whole design rests on, with no visible symptom.
+func TestClearCredentialsZeroesEveryField(t *testing.T) {
+	cfg := &rest.Config{
+		Host:            "https://example.invalid",
+		BearerToken:     "driver-own-token",
+		BearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		Username:        "admin",
+		Password:        "hunter2",
+		TLSClientConfig: rest.TLSClientConfig{
+			CertFile: "/tls/client.crt",
+			KeyFile:  "/tls/client.key",
+			CertData: []byte("cert-bytes"),
+			KeyData:  []byte("key-bytes"),
+		},
+		AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "gcp"},
+		ExecProvider: &clientcmdapi.ExecConfig{Command: "some-credential-plugin"},
+	}
+
+	clearCredentials(cfg)
+
+	if cfg.BearerToken != "" {
+		t.Errorf("BearerToken = %q, want empty", cfg.BearerToken)
+	}
+	if cfg.BearerTokenFile != "" {
+		t.Errorf("BearerTokenFile = %q, want empty", cfg.BearerTokenFile)
+	}
+	if cfg.Username != "" || cfg.Password != "" {
+		t.Errorf("Username/Password = %q/%q, want empty/empty", cfg.Username, cfg.Password)
+	}
+	if cfg.CertFile != "" || cfg.KeyFile != "" {
+		t.Errorf("CertFile/KeyFile = %q/%q, want empty/empty", cfg.CertFile, cfg.KeyFile)
+	}
+	if cfg.CertData != nil || cfg.KeyData != nil {
+		t.Errorf("CertData/KeyData = %v/%v, want nil/nil", cfg.CertData, cfg.KeyData)
+	}
+	if cfg.AuthProvider != nil {
+		t.Errorf("AuthProvider = %v, want nil", cfg.AuthProvider)
+	}
+	if cfg.ExecProvider != nil {
+		t.Errorf("ExecProvider = %v, want nil", cfg.ExecProvider)
 	}
 }

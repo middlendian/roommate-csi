@@ -103,6 +103,24 @@ func ClientFor(holder *atomic.Pointer[string]) (kubernetes.Interface, error) {
 	if err != nil {
 		return nil, fmt.Errorf("in-cluster config: %w", err)
 	}
+	clearCredentials(cfg)
+	wrapTokenAuth(cfg, holder)
+	return kubernetes.NewForConfig(cfg)
+}
+
+// clearCredentials strips every credential field client-go would otherwise
+// use to authenticate cfg, so wrapTokenAuth's round tripper is the sole
+// source of the Authorization header. In particular BearerTokenFile must
+// stay cleared: it is client-go's own dynamically-reloaded bearer-token
+// mechanism, and a reintroduced value would work silently — the driver's
+// own ServiceAccount identity would quietly replace the pod's, collapsing
+// the zero-RBAC model this package exists to enforce, with no visible
+// symptom until an audit or an incident.
+//
+// Split out from ClientFor so it can be exercised against a bare
+// *rest.Config, without needing a real in-cluster environment — the same
+// seam wrapTokenAuth already uses.
+func clearCredentials(cfg *rest.Config) {
 	cfg.BearerToken = ""
 	cfg.BearerTokenFile = ""
 	cfg.Username, cfg.Password = "", ""
@@ -110,8 +128,6 @@ func ClientFor(holder *atomic.Pointer[string]) (kubernetes.Interface, error) {
 	cfg.CertData, cfg.KeyData = nil, nil
 	cfg.AuthProvider = nil
 	cfg.ExecProvider = nil
-	wrapTokenAuth(cfg, holder)
-	return kubernetes.NewForConfig(cfg)
 }
 
 // wrapTokenAuth installs a round tripper on cfg that sets the Authorization
