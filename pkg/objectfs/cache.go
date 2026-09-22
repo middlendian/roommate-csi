@@ -141,18 +141,29 @@ type watchOutcome int
 
 const (
 	watchStopped watchOutcome = iota // ctx was cancelled; caller must return
-	watchClosed                      // result channel closed normally (e.g. server-side watch timeout); reconnect immediately
+	watchClosed                      // result channel closed; reconnect immediately only if the watch was healthy (see watchOnce)
 	watchFailed                      // establish error, Deleted, or Error event; reconnect only after backoff
 )
+
+// minHealthyWatchDuration is how long a watch must survive — or, short of
+// that, how many events it must deliver (at least one) — before its clean
+// channel close is trusted enough to reset the backoff to its floor. A
+// watch that closes instantly, over and over (e.g. a proxy or an API
+// server quirk that accepts the request but drops the connection
+// immediately) would otherwise reset backoff to zero delay on every single
+// iteration and spin Fresh+Watch against the API server unthrottled: one
+// reproduction of exactly this measured 139,313 calls in 300ms.
+const minHealthyWatchDuration = 1 * time.Second
 
 // Run drives the watch loop until ctx is cancelled. On any disconnect it
 // re-syncs with a quorum read before re-establishing the watch, so the cache
 // is never trusted across a gap it cannot account for.
 //
-// Reconnects back off exponentially unless the previous watch closed
-// cleanly. Without this, a watch that can never establish — for example
-// RBAC granting get but not watch — would spin Fresh/Watch against the API
-// server with no throttling at all.
+// Reconnects back off exponentially unless the previous watch was healthy
+// (see minHealthyWatchDuration). Without this, a watch that can never
+// establish — for example RBAC granting get but not watch — or one that
+// merely closes instantly every time, would spin Fresh/Watch against the
+// API server with no throttling at all.
 func (c *Cache) Run(ctx context.Context) {
 	backoff := 100 * time.Millisecond
 	const maxBackoff = 5 * time.Second
@@ -167,12 +178,12 @@ func (c *Cache) Run(ctx context.Context) {
 			continue
 		}
 
-		switch c.watchOnce(ctx, snap.ResourceVersion) {
-		case watchStopped:
+		switch outcome, healthy := c.watchOnce(ctx, snap.ResourceVersion); {
+		case outcome == watchStopped:
 			return
-		case watchClosed:
+		case outcome == watchClosed && healthy:
 			backoff = 100 * time.Millisecond
-		case watchFailed:
+		default:
 			if !sleepCtx(ctx, backoff) {
 				return
 			}
@@ -182,34 +193,43 @@ func (c *Cache) Run(ctx context.Context) {
 }
 
 // watchOnce runs a single watch until it closes, errors, or ctx is done.
-func (c *Cache) watchOnce(ctx context.Context, sinceRV string) watchOutcome {
+// The returned bool is only meaningful for watchClosed: it reports whether
+// this watch delivered at least one event, or otherwise survived
+// minHealthyWatchDuration — either is evidence of a genuine, working watch
+// rather than one that closes the instant it's established.
+func (c *Cache) watchOnce(ctx context.Context, sinceRV string) (watchOutcome, bool) {
 	w, err := c.store.Watch(ctx, sinceRV)
 	if err != nil {
 		if ctx.Err() != nil {
-			return watchStopped
+			return watchStopped, false
 		}
-		return watchFailed
+		return watchFailed, false
 	}
 	defer w.Stop()
+
+	start := time.Now()
+	delivered := false
 
 	for {
 		select {
 		case <-ctx.Done():
-			return watchStopped
+			return watchStopped, false
 		case ev, ok := <-w.ResultChan():
 			if !ok {
-				return watchClosed // channel closed: reconnect via a fresh Get
+				healthy := delivered || time.Since(start) >= minHealthyWatchDuration
+				return watchClosed, healthy
 			}
 			switch ev.Type {
 			case watch.Added, watch.Modified:
+				delivered = true
 				if snap, err := c.store.Decode(ev.Object); err == nil {
 					c.setFromWatch(snap)
 				}
 			case watch.Deleted:
 				// Keep serving the last snapshot; writes will fail loudly.
-				return watchFailed
+				return watchFailed, false
 			case watch.Error:
-				return watchFailed
+				return watchFailed, false
 			}
 		}
 	}

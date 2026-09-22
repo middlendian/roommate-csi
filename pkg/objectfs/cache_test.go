@@ -309,6 +309,32 @@ func TestCacheSetFromWatchInstallsOnUnparsableResourceVersion(t *testing.T) {
 	}
 }
 
+// TestCacheRunBacksOffOnRepeatedInstantWatchClose is M10's regression
+// guard. Before the fix, watchOnce's watchClosed outcome reset the backoff
+// unconditionally, with no minimum-duration or minimum-events check — a
+// watch that closes the instant it's established (every stubStore.Watch
+// call here returns a ProxyWatcher over an already-closed channel) hits
+// that reset on literally every iteration and, since the watchClosed branch
+// also never called sleepCtx, spun Fresh+Watch against the store with no
+// throttling at all.
+func TestCacheRunBacksOffOnRepeatedInstantWatchClose(t *testing.T) {
+	s := newStubStore(map[string][]byte{"a": []byte("1")})
+	close(s.watchCh) // every subsequent Watch() returns an already-closed channel
+
+	c := NewCache(s, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go c.Run(ctx)
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	if got := s.watchCallCount(); got > 20 {
+		t.Fatalf("Watch called %d times in 300ms against a watch that closes instantly every "+
+			"time — want a bounded, backed-off retry count", got)
+	}
+}
+
 // A Deleted event on the watch must not trigger an instant reconnect: Run
 // has to back off first, the same as any other disconnect that isn't a
 // clean, long-lived channel close.

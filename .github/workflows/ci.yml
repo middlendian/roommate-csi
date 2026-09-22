@@ -22,7 +22,12 @@ jobs:
         # unprivileged, so fusermount3 refuses -o allow_other unless
         # user_allow_other is set in /etc/fuse.conf.
         run: echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
-      - name: make check
+      # This intentionally is not `make check`: lint already ran above via
+      # golangci-lint-action (its own caching), and build runs as its own
+      # step below. Naming this step "make check" previously implied it ran
+      # the full check target — it doesn't — and a reviewer trusting that
+      # name once left lint red for three tasks.
+      - name: make fmt-check vet tidy-check cover
         run: make fmt-check vet tidy-check cover
       - name: go build ./...
         run: go build ./...
