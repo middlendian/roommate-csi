@@ -1,4 +1,5 @@
 name: Cut release
+run-name: Cut release ${{ inputs.version }}
 
 # Creates a release/vX.Y.Z branch from main with the CHANGELOG promoted and
 # the kustomization newTag bumped, then opens a PR. Merging the PR triggers

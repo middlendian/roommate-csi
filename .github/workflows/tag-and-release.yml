@@ -1,4 +1,8 @@
 name: Tag and release
+# Expressions can't strip the "release/" prefix, so a PR-triggered run shows
+# the head branch (release/vX.Y.Z); a dispatch shows the version input. Runs
+# for non-release PRs (skipped by the detect job) show their branch too.
+run-name: Tag and release ${{ inputs.version || github.event.pull_request.head.ref }}
 
 # Triggered when a release PR (head branch release/vX.Y.Z) is merged into
 # main. The version comes from the head branch name, so squash and
