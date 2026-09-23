@@ -67,11 +67,31 @@ spec:
               # and to consuming pods.
               mountPropagation: Bidirectional
             - {name: fuse, mountPath: /dev/fuse}
+          ports:
+            - {name: healthz, containerPort: 9809, protocol: TCP}
+          # The image is distroless — no shell — so liveness is the
+          # livenessprobe sidecar below, which calls the driver's CSI Probe
+          # RPC over the socket. That also catches a wedged gRPC server
+          # whose socket file still exists, which the old exec probe didn't.
           livenessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "test -S /csi/csi.sock"]
+            httpGet: {path: /healthz, port: healthz}
             initialDelaySeconds: 10
+            timeoutSeconds: 3
             periodSeconds: 30
+            failureThreshold: 5
+
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.20.0
+          args:
+            - --csi-address=/csi/csi.sock
+            # Shares the pod's network namespace with the roommate
+            # container, which declares the port. hostNetwork is false, so
+            # this can't collide with another driver's probe on the node.
+            - --health-port=9809
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
       volumes:
         - name: socket-dir
           hostPath:
