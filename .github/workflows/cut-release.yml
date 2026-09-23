@@ -3,7 +3,8 @@ run-name: Cut release ${{ inputs.version }}
 
 # Creates a release/vX.Y.Z branch from main with the CHANGELOG promoted and
 # the kustomization newTag bumped, then opens a PR. Merging the PR triggers
-# tag-and-release.yml, which creates the tag and runs the publish pipeline.
+# tag-and-publish.yml, which creates the tag and runs the publish pipeline;
+# merging a release PR is the only way to tag and publish.
 on:
   workflow_dispatch:
     inputs:
@@ -84,7 +85,7 @@ jobs:
 
           ## Merge instructions
 
-          Squash-merge or merge-commit both work. \`tag-and-release.yml\` reads
+          Squash-merge or merge-commit both work. \`tag-and-publish.yml\` reads
           the version from the PR's head branch name (\`$BRANCH\`), not the
           commit message.
 
