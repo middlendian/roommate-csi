@@ -15,8 +15,7 @@ modeled on `middlendian/fileblock-csi`'s.
 - There is no release process: no tags, no GitHub releases, and
   `deploy/kustomize/base` points at `:dev`.
 
-fileblock-csi solves the release half with three workflows and GoReleaser,
-but builds its image as a per-arch matrix on native runners plus a separate
+fileblock-csi solves the release half with three workflows, but builds its image as a per-arch matrix on native runners plus a separate
 manifest-merge job. ko cross-compiles Go and assembles the multi-arch index
 itself, so the same result is one job with no QEMU and no manifest step.
 
@@ -92,8 +91,6 @@ Makefile:
   (builds and discards; a local "does it build" check needing no daemon).
 - `ko-local` — `ko build --local --bare --platform=linux/$(go env GOARCH)`,
   loading into the local Docker daemon as `ko.local:<tag>`.
-- `release-snapshot` — `goreleaser release --snapshot --clean
-  --skip=publish`, as in fileblock.
 
 `mise.toml` is not added; ko is installed in CI by `ko-build/setup-ko`.
 
@@ -174,14 +171,26 @@ Two jobs instead of fileblock's three:
   revision, licenses=GPL-3.0-or-later). ko pushes both platform images and
   the index in one step, which replaces fileblock's per-arch matrix and its
   `imagetools create` manifest job.
-- **`release`** — as fileblock's: extract the `## [X.Y.Z]` CHANGELOG
-  section to `$RUNNER_TEMP`, run GoReleaser with `--release-notes`.
+- **`release`** — `needs: image`, so a GitHub release never exists
+  without its image. Extract the `## [X.Y.Z]` CHANGELOG section to
+  `$RUNNER_TEMP/release-notes.md` with fileblock's awk script (erroring if
+  it is empty), then:
 
-`.goreleaser.yaml` builds `roommate-node` for linux/amd64+arm64 with the
-same ldflags as `.ko.yaml`, archives it with LICENSE/README/CHANGELOG, and
-creates the GitHub release (`prerelease: auto`, changelog disabled). Its
-`before` hook runs `go mod tidy`, as fileblock's does. GoReleaser does not
-build images; a comment says ko does.
+  ```sh
+  gh release create "$TAG" --title "$TAG" --verify-tag \
+    --notes-file "$RUNNER_TEMP/release-notes.md" \
+    $([[ "$TAG" == *-* ]] && echo --prerelease)
+  ```
+
+  `--verify-tag` fails rather than letting `gh` create a missing tag.
+
+**No GoReleaser.** fileblock uses it for two things: per-arch binary
+tarballs and creating the GitHub release. A CSI node plugin is only
+runnable inside the DaemonSet, so the image is the only artifact anyone
+consumes, and ko already publishes it multi-arch. Creating the release is
+the one `gh` call above. Dropping it also avoids a second build config
+whose ldflags would have to be kept in sync with `.ko.yaml`. Binary
+archives can be added to the release later if a real consumer appears.
 
 Permissions are scoped as in fileblock: `contents: write` + `packages:
 write` on the release workflows, `contents: write` + `pull-requests:
