@@ -26,9 +26,14 @@ if ! kind get clusters | grep -qx "$CLUSTER"; then
   kind create cluster --name "$CLUSTER" --config "$ROOT/hack/kind.yaml"
 fi
 
-# ko builds for the host architecture and, via KO_DOCKER_REPO=kind.local,
-# loads the image straight into every node of the kind cluster.
-IMAGE_REF="$(cd "$ROOT" && KO_DOCKER_REPO=kind.local KIND_CLUSTER_NAME="$CLUSTER" \
+# ko builds for the host architecture only — kind loads a single arch per
+# node, so building both wastes time. Via KO_DOCKER_REPO=kind.local/roommate-csi,
+# ko loads the image straight into every node of the kind cluster.
+# KO_DOCKER_REPO must be a repo path, not just the kind.local pseudo-registry
+# host: bare "kind.local" makes ko name the image "kind.local:<hash>", which
+# it can't re-tag inside the kind nodes' containerd (ctr wants a proper
+# name:tag ref).
+IMAGE_REF="$(cd "$ROOT" && KO_DOCKER_REPO=kind.local/roommate-csi KIND_CLUSTER_NAME="$CLUSTER" \
   VERSION=e2e ko build --bare --platform="linux/$(go env GOARCH)" ./cmd/node)"
 echo "built $IMAGE_REF"
 
