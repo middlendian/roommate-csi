@@ -64,17 +64,45 @@ grep -qx "\[Unreleased\]: $URL/compare/v0.2.0-rc.1...HEAD" "$TMP/second.md" && e
 "$CL" notes v0.2.0-rc.1 "$TMP/second.md" | grep -q 'Thing one' && { echo "FAIL notes leaked older section"; fail=1; } || echo "ok   notes exclude older section"
 
 # --- error cases ---
+# The duplicate-version guard needs its own file where [Unreleased] still
+# has content, so promoting an already-published version is rejected
+# because of the duplicate section specifically, not because Unreleased
+# happens to be empty too (first.md's Unreleased is empty after the promote
+# above, which would make the two guards indistinguishable here).
 cp "$TMP/first.md" "$TMP/dup.md"
+sed -i 's|^## \[Unreleased\]$|## [Unreleased]\n\n- Another.|' "$TMP/dup.md"
 expect_error "duplicate version" "$CL" promote v0.1.0 2026-09-24 "$URL" "$TMP/dup.md"
-expect_error "empty unreleased" "$CL" promote v0.1.1 2026-09-24 "$URL" "$TMP/dup.md"
+
+# The empty-unreleased guard gets its own file too, promoting a version
+# that is NOT a duplicate, so only the empty-Unreleased guard can fire.
+cp "$TMP/first.md" "$TMP/empty-unreleased.md"
+expect_error "empty unreleased" "$CL" promote v0.1.1 2026-09-24 "$URL" "$TMP/empty-unreleased.md"
+
 expect_error "bad version" "$CL" promote 0.1.1 2026-09-24 "$URL" "$TMP/first.md"
 expect_error "notes missing version" "$CL" notes v9.9.9 "$TMP/first.md"
 printf '# Changelog\n\n## [Unreleased]\n\n- x\n' >"$TMP/nolink.md"
 expect_error "no unreleased link" "$CL" promote v0.1.0 2026-09-24 "$URL" "$TMP/nolink.md"
 
-# --- the real CHANGELOG must be promotable as a first release ---
+# --- the real CHANGELOG must always be well-formed for promote, regardless
+# of whether [Unreleased] currently holds content. Right after a release
+# merges, main's CHANGELOG.md has an empty [Unreleased] until the next PR
+# adds entries — promoting it as v0.1.0 in that state would legitimately
+# fail on the empty-Unreleased guard, which used to make this case flaky
+# against the real file depending on release state. So: the heading and
+# link line are always required; content is only promoted (as v999.0.0,
+# a version that can never collide with a real release) when present. ---
+grep -qx '## \[Unreleased\]' "$ROOT/CHANGELOG.md" && echo "ok   real CHANGELOG has Unreleased heading" \
+  || { echo "FAIL real CHANGELOG missing Unreleased heading"; fail=1; }
+grep -q '^\[Unreleased\]: ' "$ROOT/CHANGELOG.md" && echo "ok   real CHANGELOG has Unreleased link" \
+  || { echo "FAIL real CHANGELOG missing Unreleased link"; fail=1; }
+
 cp "$ROOT/CHANGELOG.md" "$TMP/real.md"
-"$CL" promote v0.1.0 2026-09-23 "$URL" "$TMP/real.md" >/dev/null && "$CL" notes v0.1.0 "$TMP/real.md" | grep -q '### Added' \
-  && echo "ok   real CHANGELOG" || { echo "FAIL real CHANGELOG"; fail=1; }
+if "$CL" promote v999.0.0 2026-09-23 "$URL" "$TMP/real.md" >/dev/null 2>&1; then
+  "$CL" notes v999.0.0 "$TMP/real.md" | grep -q '[^[:space:]]' \
+    && echo "ok   real CHANGELOG (Unreleased promoted)" \
+    || { echo "FAIL real CHANGELOG promoted but notes empty"; fail=1; }
+else
+  echo "ok   real CHANGELOG (Unreleased empty, promote skipped)"
+fi
 
 exit "$fail"

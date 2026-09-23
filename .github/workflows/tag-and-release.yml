@@ -18,7 +18,6 @@ on:
 
 permissions:
   contents: write   # push tag, create GitHub release
-  packages: write   # push images to ghcr.io
 
 jobs:
   detect:
@@ -66,7 +65,22 @@ jobs:
           ref: ${{ needs.detect.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
+      - name: Check for existing tag
+        # A workflow_dispatch re-run of an already-tagged version must skip
+        # verification too, not just creation: by the time main has moved
+        # on, deploy/kustomize/base/kustomization.yaml's newTag no longer
+        # matches this older $VERSION, and that's expected, not an error.
+        id: check
+        run: |
+          set -euo pipefail
+          if git rev-parse "$VERSION" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::tag $VERSION already exists; skipping verify and create"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Verify kustomization newTag matches release version
+        if: steps.check.outputs.exists != 'true'
         run: |
           set -euo pipefail
           k=deploy/kustomize/base/kustomization.yaml
@@ -75,11 +89,9 @@ jobs:
             echo "::error::$k newTag ($tag) does not match release version ($VERSION)"; exit 1
           fi
       - name: Create and push tag
+        if: steps.check.outputs.exists != 'true'
         run: |
           set -euo pipefail
-          if git rev-parse "$VERSION" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
-            echo "::notice::tag $VERSION already exists; skipping create"; exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "$VERSION"
@@ -89,6 +101,9 @@ jobs:
     name: Build and publish ${{ needs.detect.outputs.version }}
     needs: [detect, tag]
     uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write   # create GitHub release
+      packages: write   # push images to ghcr.io
     secrets: inherit
     with:
       version: ${{ needs.detect.outputs.version }}

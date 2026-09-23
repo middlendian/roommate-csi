@@ -46,11 +46,16 @@ jobs:
         env:
           KO_DOCKER_REPO: ${{ env.IMAGE }}
           VERSION: ${{ inputs.version }}
-          REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # github.sha is the caller's event SHA — on workflow_dispatch
+          # that's the dispatching branch head, not the tag commit. Read the
+          # actual commit checked out at $VERSION instead.
+          REVISION=$(git rev-parse HEAD)
           tags="$TAG"
           # :latest only for non-prereleases (SemVer prerelease has a '-').
+          # A workflow_dispatch re-run of an older non-prerelease version
+          # moves :latest back to it — this doesn't check recency.
           [[ "$TAG" == *-* ]] || tags="$tags,latest"
           ko build --bare --tags="$tags" \
             --image-label=org.opencontainers.image.title=roommate-csi \
