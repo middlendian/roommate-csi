@@ -60,6 +60,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `TestRefreshRaceProducesExactlyOneRefresh` — the deterministic,
   two-node proof that concurrent lock/refresh/unlock cycles produce
   exactly one refresh, not two.
-- Container image build (`Dockerfile`) and `make docker` target.
+- Container image for `linux/amd64` and `linux/arm64`, built with ko on a
+  distroless static base (`.ko.yaml`, `make ko`). The driver mounts FUSE
+  with go-fuse `DirectMount`, so the image needs no `fusermount3`.
+- `livenessprobe` sidecar in the DaemonSet, calling the driver's CSI
+  `Probe` RPC; replaces a shell-based exec probe.
+- Release pipeline: **Cut release** opens a `release/vX.Y.Z` PR; merging
+  it tags, pushes `ghcr.io/middlendian/roommate-csi:vX.Y.Z`, and creates
+  a GitHub release from this file.
 
 [Unreleased]: https://github.com/middlendian/roommate-csi/commits/main

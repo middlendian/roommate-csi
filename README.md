@@ -65,6 +65,12 @@ from a checkout of this repo:
 kubectl apply -k deploy/kustomize/base
 ```
 
+Images are published for `linux/amd64` and `linux/arm64` at
+`ghcr.io/middlendian/roommate-csi:vX.Y.Z` (and `:latest` for the newest
+non-prerelease). On `main`, `deploy/kustomize/base` points at the most
+recent release's tag; check out a release tag to install exactly that
+version.
+
 This is the only cluster-wide step. There is no controller, no
 `StorageClass`, and nothing else to install.
 

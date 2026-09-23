@@ -36,7 +36,10 @@ pkg/podtoken/              extracts the pod's identity/token from volume context
 deploy/kustomize/base/     namespace, driver ServiceAccount (zero RBAC),
                            CSIDriver, roommate-user ClusterRole, DaemonSet
 examples/                  rbac.yaml (per-object Role+RoleBinding), pod.yaml
-hack/                      e2e.sh, kind.yaml
+hack/                      e2e.sh, kind.yaml, changelog.sh (+ _test.sh:
+                           CHANGELOG promote/notes for release workflows)
+.ko.yaml                   image build: distroless, amd64+arm64
+.github/workflows/         cut-release -> tag-and-release -> release
 test/apisemantics/         envtest suite against a real apiserver + etcd
 test/e2e/                  kind, three nodes (1 control-plane + 2 workers); build tag: e2e
 docs/superpowers/specs/    the v1 design doc
@@ -59,7 +62,9 @@ make tidy-check  # fail if go.mod/go.sum need tidying (CI gate)
 make check       # fmt-check + vet + lint + tidy-check + cover + build
 make envtest     # real apiserver + etcd via setup-envtest; see below
 make e2e         # kind cluster + go test -tags=e2e ./test/e2e/...; see below
-make docker      # docker build (IMAGE/TAG overridable)
+make ko          # ko build linux/amd64 + linux/arm64, no push
+make ko-local    # ko build for the host arch into the local Docker daemon
+make changelog-test  # tests for hack/changelog.sh (CI gate)
 ```
 
 What each target needs beyond a Go toolchain:
@@ -87,6 +92,8 @@ What each target needs beyond a Go toolchain:
   watch scoped by `resourceNames` genuinely requires the
   `metadata.name` field selector — the last one is a fake-clientset blind
   spot that would otherwise only surface in a live cluster.
+- `make ko` / `make ko-local` — `ko` on `PATH` (v0.19.1); `VERSION`
+  defaults from `git describe`.
 - `make e2e` — Docker and `kind` on `PATH`, plus `/dev/fuse` on the host
   (the script `modprobe fuse`s if it's missing and fails loudly if that
   doesn't work). Builds the image, loads it into a three-node (1
@@ -94,6 +101,8 @@ What each target needs beyond a Go toolchain:
   applies `deploy/kustomize/base`, and runs the `e2e`-tagged suite in
   `test/e2e/`. `TestRefreshRaceProducesExactlyOneRefresh` is the test that
   matters: it is the end-to-end proof of this driver's whole premise.
+  `make e2e` now needs `ko` instead of `docker build` to produce the image
+  (Docker is still needed for `kind`).
 
 ## Invariants an agent must not break
 
@@ -169,6 +178,13 @@ most of the unit suite.
   deliberately hardcodes the expected literal on the right-hand side and
   must stay that way — do not "simplify" it back to referencing the
   constants.
+- **The image has no shell and no `fusermount3`.** It is distroless
+  (`.ko.yaml`). go-fuse mounts with `DirectMount` (`pkg/objectfs/mount.go`),
+  which works because the driver runs as root. Keep it `DirectMount`, never
+  `DirectMountStrict`: the unprivileged FUSE unit tests depend on the
+  `fusermount3` fallback. Don't add exec probes or anything else that
+  shells out inside the driver container; liveness is the `livenessprobe`
+  sidecar.
 
 ## Other things worth knowing before changing code
 
@@ -213,3 +229,28 @@ most of the unit suite.
   above).
 - README.md and this file updated when the CSI surface, RBAC shape, or
   configuration attributes change.
+
+## Releasing
+
+Run the **Cut release** workflow with `vX.Y.Z` (needs a non-empty
+`## [Unreleased]` section in `CHANGELOG.md`), then review and merge the
+`release/vX.Y.Z` PR it opens. Merging triggers **Tag and release**, which
+tags the merge commit, pushes the multi-arch image, and creates the GitHub
+release. To re-run a release (e.g. after a flake), dispatch **Tag and
+release** by hand with the version.
+
+A few things about the pipeline worth knowing before you touch it:
+
+- The repo setting "Allow GitHub Actions to create and approve pull
+  requests" (Settings → Actions → General) must be enabled, or **Cut
+  release**'s `gh pr create` fails.
+- The release PR is opened with `GITHUB_TOKEN`, so `pull_request` CI does
+  not run on it — the **Tag and release** run is where problems actually
+  show up.
+- The ghcr.io package is created on the first release push and is private
+  by default; make it public once so clusters can pull the image without
+  credentials.
+- If **Cut release** fails after pushing `release/vX.Y.Z` but before
+  opening the PR, delete that branch before re-running the workflow.
+- A tag ruleset on `refs/tags/v*` is recommended, though not required by
+  the pipeline itself.
