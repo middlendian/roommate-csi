@@ -42,8 +42,8 @@ hack/                      e2e.sh, kind.yaml, changelog.sh (+ _test.sh:
 .github/workflows/         cut-release -> tag-and-release -> release
 test/apisemantics/         envtest suite against a real apiserver + etcd
 test/e2e/                  kind, three nodes (1 control-plane + 2 workers); build tag: e2e
-docs/superpowers/specs/    the v1 design doc
-docs/superpowers/plans/    the v1 implementation plan
+docs/superpowers/specs/    design docs (v1, ko/release)
+docs/superpowers/plans/    implementation plans
 ```
 
 ## Build / test commands
@@ -59,7 +59,7 @@ make fmt         # gofmt -s -w in place
 make lint        # golangci-lint run
 make tidy        # go mod tidy
 make tidy-check  # fail if go.mod/go.sum need tidying (CI gate)
-make check       # fmt-check + vet + lint + tidy-check + cover + build
+make check       # fmt-check + vet + lint + tidy-check + cover + build + changelog-test
 make envtest     # real apiserver + etcd via setup-envtest; see below
 make e2e         # kind cluster + go test -tags=e2e ./test/e2e/...; see below
 make ko          # ko build linux/amd64 + linux/arm64, no push
@@ -216,6 +216,8 @@ most of the unit suite.
 - `make test` (or `make test-race` for anything touching concurrency —
   `pkg/objectfs`, `pkg/mounts`, `pkg/driver`) passes.
 - `make fmt-check` and `make lint` clean.
+- `make changelog-test` passes if `hack/changelog.sh` or the release
+  workflows that call it changed.
 - `make envtest` passes if the change touches quorum-read semantics,
   merge-patch behavior, Lease CAS, or the field-selector watch — anything
   in `pkg/objectfs/store_secret.go`, `store_configmap.go`, `commit.go`, or
@@ -254,3 +256,11 @@ A few things about the pipeline worth knowing before you touch it:
   opening the PR, delete that branch before re-running the workflow.
 - A tag ruleset on `refs/tags/v*` is recommended, though not required by
   the pipeline itself.
+- **A prerelease consumes `[Unreleased]`, same as a final release.**
+  Promoting `vX.Y.Z-rc.N` moves everything out of `## [Unreleased]` into its
+  own section, same as promoting a final version — there's no separate
+  staging area for prereleases. If you cut the final `vX.Y.Z` afterwards
+  with nothing new added, **Cut release** fails on the empty-`[Unreleased]`
+  guard in `hack/changelog.sh`. Before cutting the final, add an entry
+  under `[Unreleased]`, e.g. `- Promoted X.Y.Z-rc.N to stable; see
+  [X.Y.Z-rc.N] for changes.` — or skip the rc and cut the final directly.

@@ -57,7 +57,7 @@ jobs:
           # A workflow_dispatch re-run of an older non-prerelease version
           # moves :latest back to it — this doesn't check recency.
           [[ "$TAG" == *-* ]] || tags="$tags,latest"
-          ko build --bare --tags="$tags" \
+          ko build --bare --sbom=none --tags="$tags" \
             --image-label=org.opencontainers.image.title=roommate-csi \
             --image-label="org.opencontainers.image.description=Kubernetes CSI driver mounting a Secret or ConfigMap as a writable, cross-node shared directory" \
             --image-label=org.opencontainers.image.url=https://github.com/middlendian/roommate-csi \

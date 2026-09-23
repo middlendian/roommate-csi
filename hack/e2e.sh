@@ -50,6 +50,20 @@ fi
 kubectl --context "kind-$CLUSTER" apply -f - <<<"$MANIFESTS"
 kubectl --context "kind-$CLUSTER" -n roommate-system rollout status ds/roommate-node --timeout=180s
 
+# rollout status only waits on Ready, and Ready comes from the roommate
+# container's own httpGet probe against the livenessprobe sidecar's
+# /healthz — it doesn't prove the sidecar itself answers. Check it directly
+# so a wedged sidecar (or a misrouted --health-port) fails the run here
+# instead of surfacing later as a mysterious flake.
+PODS="$(kubectl --context "kind-$CLUSTER" -n roommate-system get pods -l app=roommate-node -o jsonpath='{.items[*].metadata.name}')"
+for pod in $PODS; do
+  if ! kubectl --context "kind-$CLUSTER" get --raw \
+    "/api/v1/namespaces/roommate-system/pods/${pod}:9809/proxy/healthz" >/dev/null; then
+    echo "error: livenessprobe /healthz check failed for pod $pod" >&2
+    exit 1
+  fi
+done
+
 KUBECONFIG_FILE="$(mktemp)"
 kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG_FILE"
 KUBECONFIG="$KUBECONFIG_FILE" go test -tags=e2e -timeout=20m -count=1 -v "$ROOT/test/e2e/..."

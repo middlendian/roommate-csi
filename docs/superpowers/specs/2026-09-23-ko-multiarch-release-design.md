@@ -1,6 +1,6 @@
 # Multi-arch images with ko, and a tag/release pipeline
 
-**Status:** draft
+**Status:** implemented
 **Date:** 2026-09-23
 
 Build the driver image with [ko](https://ko.build) for `linux/amd64` and
@@ -112,14 +112,24 @@ find, by design.
 Replace `docker build` + `kind load docker-image` with:
 
 ```sh
-IMAGE_REF="$(KO_DOCKER_REPO=kind.local KIND_CLUSTER_NAME="$CLUSTER" \
+IMAGE_REF="$(KO_DOCKER_REPO=kind.local/roommate-csi KIND_CLUSTER_NAME="$CLUSTER" \
   VERSION=e2e ko build --bare --platform="linux/$(go env GOARCH)" ./cmd/node)"
 ```
 
-`kind.local` makes ko load the image straight into the kind nodes. The
-script then applies `deploy/kustomize/base` through a temporary
-kustomization (in a `mktemp -d` directory) whose `images:` entry rewrites
-`ghcr.io/middlendian/roommate-csi` to `IMAGE_REF`. The base is not edited.
+`KO_DOCKER_REPO` must be a repo path under the `kind.local` pseudo-registry,
+not just the bare host: `kind.local` alone makes ko name the image
+`kind.local:<hash>`, which it can't re-tag inside the kind nodes'
+containerd (`ctr` wants a proper `name:tag` ref) — `kind.local` makes ko
+load the image straight into the kind nodes once the repo path is present.
+
+The script renders `deploy/kustomize/base` with `kubectl kustomize` and
+substitutes the image with `sed`, rather than pointing a temporary
+kustomization's `images:` entry at it: kustomize refuses an absolute base
+path from a kustomization in a temp overlay directory, which a `mktemp -d`
+overlay would need. The substitution fails loudly (grep-checks that the
+new image line is actually present in the rendered output) rather than
+silently deploying whatever tag `base` happens to reference. The base
+itself is not edited.
 
 `e2e.yml` adds `ko-build/setup-ko`. The e2e suite runs unchanged against
 the distroless image; this is the test that proves `DirectMount` and the
@@ -150,8 +160,13 @@ the workflow treats this as the first release: the new version's link is
 
 Identical to fileblock's: runs only for a merged PR whose head ref starts
 with `release/v`, reads the version from the branch name, verifies
-`newTag` matches, creates and pushes the annotated tag (idempotently), then
-calls `release.yml`. `workflow_dispatch` is the re-run escape hatch.
+`newTag` matches, creates and pushes the annotated tag, then calls
+`release.yml`. The tag job checks for the tag first (locally and on
+`origin`) and skips both the `newTag` verification and the create/push
+steps when it already exists, so a `workflow_dispatch` re-run after main
+has moved past that version — where `newTag` legitimately no longer
+matches — doesn't fail spuriously. `workflow_dispatch` is the re-run
+escape hatch.
 
 ### `release.yml` (workflow_call, input `version`)
 
@@ -162,15 +177,20 @@ Two jobs instead of fileblock's three:
 
   ```sh
   KO_DOCKER_REPO=ghcr.io/middlendian/roommate-csi VERSION=$TAG \
-    ko build --bare --tags="$TAG[,latest]" \
+    ko build --bare --sbom=none --tags="$TAG[,latest]" \
     --image-label=org.opencontainers.image.…=… ./cmd/node
   ```
 
-  `latest` is added only when the version contains no `-`. The OCI labels
-  match fileblock's set (title, description, url, source, version,
-  revision, licenses=GPL-3.0-or-later). ko pushes both platform images and
-  the index in one step, which replaces fileblock's per-arch matrix and its
-  `imagetools create` manifest job.
+  `latest` is added only when the version contains no `-`. `--sbom=none`
+  is passed because ko 0.19 pushes an SBOM by default and SBOM
+  attestations are out of scope (see below). The OCI labels match
+  fileblock's set (title, description, url, source, version, revision,
+  licenses=GPL-3.0-only — this repo's `LICENSE` is plain GPLv3 with no "or
+  later" grant). `revision` is `git rev-parse HEAD` read after checkout at
+  the tag, not `github.sha`: on a `workflow_dispatch` re-run `github.sha`
+  is the dispatching branch's head, not the tagged commit. ko pushes both
+  platform images and the index in one step, which replaces fileblock's
+  per-arch matrix and its `imagetools create` manifest job.
 - **`release`** — `needs: image`, so a GitHub release never exists
   without its image. Extract the `## [X.Y.Z]` CHANGELOG section to
   `$RUNNER_TEMP/release-notes.md` with fileblock's awk script (erroring if
@@ -246,7 +266,20 @@ write` on cut-release, `contents: read` on CI.
 - Release workflows cannot be exercised before merge. After merge, cut a
   prerelease (e.g. `v0.1.0-rc.1`) to exercise the pipeline end to end
   without moving `:latest`; verify with `docker buildx imagetools inspect`
-  that the index lists both platforms.
+  that the index lists both platforms. A prerelease consumes
+  `[Unreleased]` exactly as a final release does, so cutting the final
+  `vX.Y.Z` afterwards needs a fresh `[Unreleased]` entry first (e.g.
+  "Promoted X.Y.Z-rc.N to stable; see [X.Y.Z-rc.N] for changes.") — or
+  skip the rc and cut the final directly. See CLAUDE.md's Releasing
+  section.
+- Liveness is verified in `make e2e`, not just declared: after the
+  DaemonSet rollout reports Ready, the script proxies a direct `GET
+  /healthz` to the `livenessprobe` sidecar on each `roommate-node` pod
+  (`kubectl get --raw
+  /api/v1/namespaces/roommate-system/pods/<pod>:9809/proxy/healthz`) and
+  fails the run if any pod doesn't answer — `rollout status` alone only
+  proves the container-level probe passed, not that the sidecar itself is
+  live.
 
 ## Out of scope
 

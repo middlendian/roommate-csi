@@ -43,7 +43,7 @@ tidy-check:
 	fi; \
 	rm -f go.mod.bak go.sum.bak
 
-check: fmt-check vet lint tidy-check cover build
+check: fmt-check vet lint tidy-check cover build changelog-test
 
 clean:
 	rm -rf $(BIN) cover.out

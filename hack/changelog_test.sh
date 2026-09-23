@@ -96,11 +96,21 @@ grep -qx '## \[Unreleased\]' "$ROOT/CHANGELOG.md" && echo "ok   real CHANGELOG h
 grep -q '^\[Unreleased\]: ' "$ROOT/CHANGELOG.md" && echo "ok   real CHANGELOG has Unreleased link" \
   || { echo "FAIL real CHANGELOG missing Unreleased link"; fail=1; }
 
+# Same emptiness check changelog.sh's promote() uses, so this test's branch
+# tracks the real guard instead of guessing at promote's exit status for
+# whatever reason it might fail.
+real_content=$(awk '/^## \[Unreleased\]$/{found=1; next} found && /^## \[/{exit} found && /^\[.+\]:/{exit} found && /[^[:space:]]/{print; exit}' "$ROOT/CHANGELOG.md")
+
 cp "$ROOT/CHANGELOG.md" "$TMP/real.md"
-if "$CL" promote v999.0.0 2026-09-23 "$URL" "$TMP/real.md" >/dev/null 2>&1; then
-  "$CL" notes v999.0.0 "$TMP/real.md" | grep -q '[^[:space:]]' \
-    && echo "ok   real CHANGELOG (Unreleased promoted)" \
-    || { echo "FAIL real CHANGELOG promoted but notes empty"; fail=1; }
+if [[ -n "$real_content" ]]; then
+  # [Unreleased] has content: promote MUST succeed and notes MUST be non-empty.
+  if "$CL" promote v999.0.0 2026-09-23 "$URL" "$TMP/real.md" >/dev/null 2>&1; then
+    "$CL" notes v999.0.0 "$TMP/real.md" | grep -q '[^[:space:]]' \
+      && echo "ok   real CHANGELOG (Unreleased promoted)" \
+      || { echo "FAIL real CHANGELOG promoted but notes empty"; fail=1; }
+  else
+    echo "FAIL real CHANGELOG promote failed despite non-empty Unreleased"; fail=1
+  fi
 else
   echo "ok   real CHANGELOG (Unreleased empty, promote skipped)"
 fi

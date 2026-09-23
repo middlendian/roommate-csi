@@ -19,6 +19,13 @@ on:
 permissions:
   contents: write   # push tag, create GitHub release
 
+# A workflow_dispatch re-run and a PR-merge-triggered run must not execute
+# concurrently — both can create/push the same tag and both fan out into
+# release.yml. Never cancel an in-flight release to start another.
+concurrency:
+  group: tag-and-release
+  cancel-in-progress: false
+
 jobs:
   detect:
     name: Detect release PR
