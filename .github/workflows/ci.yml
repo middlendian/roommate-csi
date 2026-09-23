@@ -1,6 +1,9 @@
 name: ci
 on:
+  # push is limited to main so a PR branch runs CI once (via pull_request),
+  # not twice; e2e.yml uses the same split.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
