@@ -58,3 +58,34 @@ func TestMountGrantsAtomicOTrunc(t *testing.T) {
 		t.Fatal("kernel did not grant FUSE_CAP_ATOMIC_O_TRUNC on this test environment")
 	}
 }
+
+// TestMountOptionsDirectMount pins the options that let the driver image
+// ship without fusermount3. DirectMount makes go-fuse call mount(2) and
+// umount(2) itself (always succeeds as root in the privileged DaemonSet);
+// it must NOT be DirectMountStrict, because the unprivileged FUSE tests in
+// this package rely on go-fuse falling back to fusermount3 when mount(2)
+// returns EPERM. DirectMountFlags stays zero so go-fuse applies
+// MS_NOSUID|MS_NODEV, the same flags fusermount3 uses.
+func TestMountOptionsDirectMount(t *testing.T) {
+	opts := mountOptions(&Volume{Cfg: Config{ObjectName: "oauth-credentials"}})
+
+	if !opts.DirectMount {
+		t.Error("DirectMount = false; the distroless image has no fusermount3")
+	}
+	if opts.DirectMountStrict {
+		t.Error("DirectMountStrict = true; unprivileged FUSE tests need the fusermount3 fallback")
+	}
+	if opts.DirectMountFlags != 0 {
+		t.Errorf("DirectMountFlags = %#x, want 0 (go-fuse default MS_NOSUID|MS_NODEV)", opts.DirectMountFlags)
+	}
+	// The pre-existing options must survive the refactor.
+	if !opts.AllowOther || !opts.EnableLocks {
+		t.Errorf("AllowOther=%v EnableLocks=%v, want both true", opts.AllowOther, opts.EnableLocks)
+	}
+	if opts.ExtraCapabilities&fuse.CAP_ATOMIC_O_TRUNC == 0 {
+		t.Error("ExtraCapabilities lost CAP_ATOMIC_O_TRUNC")
+	}
+	if opts.FsName != "oauth-credentials" || opts.Name != "roommate" {
+		t.Errorf("FsName=%q Name=%q, want %q/%q", opts.FsName, opts.Name, "oauth-credentials", "roommate")
+	}
+}

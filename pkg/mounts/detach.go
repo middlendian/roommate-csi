@@ -40,10 +40,12 @@ func DetachStale(target string) error {
 	if err := unix.Unmount(target, unix.MNT_DETACH); err == nil {
 		return nil
 	} else if out, ferr := exec.Command("fusermount3", "-u", "-z", target).CombinedOutput(); ferr != nil {
-		// The raw syscall failed. Fall back to the same tool go-fuse itself
-		// shells out to for unmounting, in case the permission or namespace
-		// context of a plain umount2 call differs from what fusermount3's
-		// setuid-root helper can do.
+		// The raw syscall failed. Fall back to fusermount3 in case the
+		// permission or namespace context of a plain umount2 call differs
+		// from what its setuid-root helper can do. The driver image
+		// (distroless, see .ko.yaml) does not ship fusermount3, so in
+		// production this fallback fails with an exec error — but only
+		// after umount2 has already failed, which it doesn't as root.
 		return fmt.Errorf("umount2(MNT_DETACH) %s: %w; fusermount3 -u -z: %v (%s)",
 			target, err, ferr, out)
 	}
