@@ -101,8 +101,8 @@ What each target needs beyond a Go toolchain:
   applies `deploy/kustomize/base`, and runs the `e2e`-tagged suite in
   `test/e2e/`. `TestRefreshRaceProducesExactlyOneRefresh` is the test that
   matters: it is the end-to-end proof of this driver's whole premise.
-  `make e2e` now needs `ko` instead of `docker build` to produce the image
-  (Docker is still needed for `kind`).
+  `make e2e` builds the image with `ko`, so `ko` must be on `PATH` too;
+  Docker is still needed for `kind`.
 
 ## Invariants an agent must not break
 
