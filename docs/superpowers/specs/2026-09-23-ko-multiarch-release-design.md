@@ -184,6 +184,21 @@ Two jobs instead of fileblock's three:
 
   `--verify-tag` fails rather than letting `gh` create a missing tag.
 
+  A final step reads the body back (`gh release view "$TAG" --json body`)
+  and fails the job if it is blank. Every fileblock-csi release body is
+  blank even though its extraction step works: in CI the notes file for
+  v0.4.0 held the full `## [0.4.0]` section (it is echoed in the run log),
+  but its `.goreleaser.yaml` sets `changelog.disable: true`, and in
+  GoReleaser v2 that makes the changelog pipe's `Skip` return true —
+  and that same pipe's `Run` is the only place `--release-notes` is
+  loaded. So the file was silently dropped. Nothing in fileblock's
+  pipeline checks the published result, which is why this went unnoticed
+  for 13 releases; the read-back check is the guard against any future
+  cause of the same symptom. The awk extraction itself is reused as-is: it
+  was checked against both fileblock's v0.4.0 CHANGELOG and a simulated
+  first-release promotion of this repo's CHANGELOG, and produced the full
+  section each time.
+
 **No GoReleaser.** fileblock uses it for two things: per-arch binary
 tarballs and creating the GitHub release. A CSI node plugin is only
 runnable inside the DaemonSet, so the image is the only artifact anyone
