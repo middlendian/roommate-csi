@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release image build: the image's OCI description label contained a
+  comma, which ko splits `--image-label` values on, so the build failed
+  before pushing. The v0.1.0 tag exists but no v0.1.0 image or GitHub
+  release was published; 0.1.1 is the first published release.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added
