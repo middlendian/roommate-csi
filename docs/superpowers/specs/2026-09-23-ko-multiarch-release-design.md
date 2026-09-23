@@ -112,15 +112,16 @@ find, by design.
 Replace `docker build` + `kind load docker-image` with:
 
 ```sh
-IMAGE_REF="$(KO_DOCKER_REPO=kind.local/roommate-csi KIND_CLUSTER_NAME="$CLUSTER" \
+IMAGE_REF="$(cd "$ROOT" && KO_DOCKER_REPO=kind.local/roommate-csi KIND_CLUSTER_NAME="$CLUSTER" \
   VERSION=e2e ko build --bare --platform="linux/$(go env GOARCH)" ./cmd/node)"
 ```
 
-`KO_DOCKER_REPO` must be a repo path under the `kind.local` pseudo-registry,
-not just the bare host: `kind.local` alone makes ko name the image
-`kind.local:<hash>`, which it can't re-tag inside the kind nodes'
-containerd (`ctr` wants a proper `name:tag` ref) — `kind.local` makes ko
-load the image straight into the kind nodes once the repo path is present.
+The `kind.local` registry prefix tells ko to load the image straight into
+the kind nodes instead of pushing it. `KO_DOCKER_REPO` must include a repo
+path under it (`kind.local/roommate-csi`), not just the bare `kind.local`:
+with `--bare`, a bare `kind.local` makes ko name the image
+`kind.local:<hash>`, which it then can't re-tag inside the kind nodes'
+containerd (`ctr` wants a proper `name:tag` ref).
 
 The script renders `deploy/kustomize/base` with `kubectl kustomize` and
 substitutes the image with `sed`, rather than pointing a temporary

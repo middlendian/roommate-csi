@@ -50,11 +50,11 @@ fi
 kubectl --context "kind-$CLUSTER" apply -f - <<<"$MANIFESTS"
 kubectl --context "kind-$CLUSTER" -n roommate-system rollout status ds/roommate-node --timeout=180s
 
-# rollout status only waits on Ready, and Ready comes from the roommate
-# container's own httpGet probe against the livenessprobe sidecar's
-# /healthz — it doesn't prove the sidecar itself answers. Check it directly
-# so a wedged sidecar (or a misrouted --health-port) fails the run here
-# instead of surfacing later as a mysterious flake.
+# rollout status only waits on Ready, and with no readiness probe that says
+# nothing about liveness: the roommate container's httpGet liveness probe
+# against the livenessprobe sidecar's /healthz doesn't fail until minutes
+# after start. Check /healthz directly so a wedged sidecar (or a misrouted
+# --health-port) fails the run here instead of as a later restart loop.
 PODS="$(kubectl --context "kind-$CLUSTER" -n roommate-system get pods -l app=roommate-node -o jsonpath='{.items[*].metadata.name}')"
 for pod in $PODS; do
   if ! kubectl --context "kind-$CLUSTER" get --raw \
