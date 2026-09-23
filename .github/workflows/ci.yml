@@ -1,6 +1,9 @@
 name: ci
 on:
+  # push is limited to main so a PR branch runs CI once (via pull_request),
+  # not twice; e2e.yml uses the same split.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -27,8 +30,8 @@ jobs:
       # step below. Naming this step "make check" previously implied it ran
       # the full check target — it doesn't — and a reviewer trusting that
       # name once left lint red for three tasks.
-      - name: make fmt-check vet tidy-check cover
-        run: make fmt-check vet tidy-check cover
+      - name: make fmt-check vet tidy-check cover changelog-test
+        run: make fmt-check vet tidy-check cover changelog-test
       - name: go build ./...
         run: go build ./...
       - name: api semantics (envtest)
@@ -47,11 +50,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: make docker
-        run: make docker
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: ko-build/setup-ko@v0.10
+        with:
+          version: v0.19.1
+      - name: ko build linux/amd64 + linux/arm64
+        env:
+          VERSION: ci
+        run: make ko
       - name: smoke test -h
-        run: docker run --rm ghcr.io/middlendian/roommate-csi:dev -h
-      - name: smoke test fusermount3 is present
-        # fuse3 supplies fusermount3, which go-fuse shells out to for
-        # unmounting; confirm it's actually in the image.
-        run: docker run --rm --entrypoint fusermount3 ghcr.io/middlendian/roommate-csi:dev -V
+        # The image is distroless: no shell and, by design, no fusermount3
+        # (the driver uses go-fuse DirectMount). -h is the whole smoke test.
+        env:
+          VERSION: ci
+        run: |
+          ref=$(KO_DOCKER_REPO=ko.local ko build --bare --local --platform=linux/amd64 ./cmd/node)
+          docker run --rm "$ref" -h

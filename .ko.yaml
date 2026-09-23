@@ -1,0 +1,21 @@
+# ko builds the driver image: a static Go binary on distroless, for both
+# architectures, with no Dockerfile. The base has no shell and no
+# fusermount3 — the driver mounts via go-fuse DirectMount
+# (pkg/objectfs/mount.go) and the DaemonSet's liveness check is the
+# livenessprobe sidecar, so neither is needed. It runs as root, which
+# /dev/fuse and mount(2) require; do not switch to the :nonroot variant.
+#
+# VERSION must be set in the environment for every ko invocation.
+defaultBaseImage: gcr.io/distroless/static-debian12
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+builds:
+  - id: roommate-node
+    main: ./cmd/node
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Env.VERSION}}

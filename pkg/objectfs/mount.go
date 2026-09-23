@@ -29,22 +29,34 @@ import (
 // this negotiated, File.Open handles O_TRUNC directly; SETATTR's fh-less
 // path is then only reachable from a genuine standalone truncate(2), where
 // committing immediately is correct because there is no handle at all.
+//
+// DirectMount makes go-fuse call mount(2)/umount(2) itself instead of
+// shelling out to the setuid fusermount3 helper. As root in the privileged
+// DaemonSet that always succeeds, which is why the driver image (distroless,
+// see .ko.yaml) carries no fusermount3 at all. It is deliberately not
+// DirectMountStrict: unprivileged callers — this package's FUSE tests on CI
+// runners — get EPERM from mount(2) and must fall back to fusermount3.
 func Mount(dir string, v *Volume) (*fuse.Server, error) {
 	root := &Root{vol: v}
-	srv, err := fs.Mount(dir, root, &fs.Options{
-		MountOptions: fuse.MountOptions{
-			AllowOther:        true,
-			FsName:            v.Cfg.ObjectName,
-			Name:              "roommate",
-			EnableLocks:       true,
-			ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
-		},
-	})
+	srv, err := fs.Mount(dir, root, &fs.Options{MountOptions: mountOptions(v)})
 	if err != nil {
 		return nil, err
 	}
 	checkAtomicOTrunc(srv)
 	return srv, nil
+}
+
+// mountOptions returns the FUSE mount options for v. Split out of Mount so
+// the options can be asserted without a mount.
+func mountOptions(v *Volume) fuse.MountOptions {
+	return fuse.MountOptions{
+		AllowOther:        true,
+		FsName:            v.Cfg.ObjectName,
+		Name:              "roommate",
+		EnableLocks:       true,
+		ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
+		DirectMount:       true,
+	}
 }
 
 // checkAtomicOTrunc logs loudly if the kernel did not grant

@@ -1,0 +1,96 @@
+name: Cut release
+
+# Creates a release/vX.Y.Z branch from main with the CHANGELOG promoted and
+# the kustomization newTag bumped, then opens a PR. Merging the PR triggers
+# tag-and-release.yml, which creates the tag and runs the publish pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0)"
+        type: string
+        required: true
+
+permissions:
+  contents: write       # push branch
+  pull-requests: write  # open PR
+
+jobs:
+  cut:
+    name: Cut ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      BRANCH: release/${{ inputs.version }}
+      KUSTOMIZATION: deploy/kustomize/base/kustomization.yaml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check tag and branch don't exist
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag $VERSION already exists on origin"; exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::branch $BRANCH already exists on origin"; exit 1
+          fi
+
+      - name: Promote CHANGELOG.md
+        # Validates the version and the [Unreleased] section too; see
+        # hack/changelog.sh. Prints the previous tag, empty on the first release.
+        run: |
+          set -euo pipefail
+          prev=$(hack/changelog.sh promote "$VERSION" "$(date +%Y-%m-%d)" "https://github.com/$GITHUB_REPOSITORY")
+          echo "PREV_TAG=$prev" >> "$GITHUB_ENV"
+
+      - name: Bump kustomization newTag
+        run: |
+          set -euo pipefail
+          current=$(awk '/^[[:space:]]+newTag:/ {print $2; exit}' "$KUSTOMIZATION")
+          if [ "$current" = "$VERSION" ]; then
+            echo "::error::$KUSTOMIZATION already has newTag: $VERSION"; exit 1
+          fi
+          echo "OLD_TAG=$current" >> "$GITHUB_ENV"
+          sed -i -E "s|^([[:space:]]+)newTag: .*$|\1newTag: $VERSION|" "$KUSTOMIZATION"
+
+      - name: Commit and push release branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add CHANGELOG.md "$KUSTOMIZATION"
+          git commit -m "release: $VERSION"
+          git push -u origin "$BRANCH"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr create --base main --head "$BRANCH" --title "release: $VERSION" --body "$(cat <<EOF
+          ## Summary
+
+          Cuts release **$VERSION**.
+
+          - Promotes \`## [Unreleased]\` → \`## [${VERSION#v}] - $(date +%Y-%m-%d)\` in \`CHANGELOG.md\`.
+          - Bumps \`$KUSTOMIZATION\` \`newTag\` from \`$OLD_TAG\` to \`$VERSION\`.
+          - Previous release: ${PREV_TAG:-none (first release)}.
+
+          ## Merge instructions
+
+          Squash-merge or merge-commit both work. \`tag-and-release.yml\` reads
+          the version from the PR's head branch name (\`$BRANCH\`), not the
+          commit message.
+
+          After merge:
+          - Multi-arch image (linux/amd64, linux/arm64) at
+            \`ghcr.io/middlendian/roommate-csi:$VERSION\` (and \`:latest\` for
+            non-prereleases) is published.
+          - A GitHub release is created with the CHANGELOG section as its body.
+          EOF
+          )"
