@@ -1,0 +1,103 @@
+name: Release
+
+# Reusable workflow, called by tag-and-release.yml after it creates the
+# vX.Y.Z tag. Not triggered by tag pushes directly.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0)"
+        type: string
+        required: true
+
+permissions:
+  contents: write   # create GitHub release
+  packages: write   # push images to ghcr.io
+
+env:
+  GO_VERSION: "1.25"
+  IMAGE: ghcr.io/middlendian/roommate-csi
+
+jobs:
+  image:
+    name: Image (linux/amd64 + linux/arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: ko-build/setup-ko@v0.10
+        with:
+          version: v0.19.1
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | ko login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build and push
+        # ko cross-compiles both platforms and pushes them plus the index in
+        # one step — no per-arch runners, no QEMU, no manifest-merge job.
+        env:
+          KO_DOCKER_REPO: ${{ env.IMAGE }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tags="$TAG"
+          # :latest only for non-prereleases (SemVer prerelease has a '-').
+          [[ "$TAG" == *-* ]] || tags="$tags,latest"
+          ko build --bare --tags="$tags" \
+            --image-label=org.opencontainers.image.title=roommate-csi \
+            --image-label="org.opencontainers.image.description=Kubernetes CSI driver mounting a Secret or ConfigMap as a writable, cross-node shared directory" \
+            --image-label=org.opencontainers.image.url=https://github.com/middlendian/roommate-csi \
+            --image-label=org.opencontainers.image.source=https://github.com/middlendian/roommate-csi \
+            --image-label="org.opencontainers.image.version=$TAG" \
+            --image-label="org.opencontainers.image.revision=$REVISION" \
+            --image-label=org.opencontainers.image.licenses=GPL-3.0-only \
+            ./cmd/node
+
+  release:
+    name: GitHub release
+    needs: image   # never publish a release whose image failed to push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version }}
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          hack/changelog.sh notes "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          echo "::group::Release notes for $VERSION"; cat "$RUNNER_TEMP/release-notes.md"; echo "::endgroup::"
+      - name: Create or update GitHub release
+        # Editing when it already exists makes a workflow_dispatch re-run of
+        # a half-finished release succeed instead of failing here.
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            prerelease=()
+            [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$VERSION" --title "$VERSION" --verify-tag \
+              --notes-file "$RUNNER_TEMP/release-notes.md" "${prerelease[@]}"
+          fi
+      - name: Verify the published release body is not blank
+        # fileblock-csi shipped 13 releases with blank bodies because nothing
+        # checked what was actually published. Check it.
+        run: |
+          set -euo pipefail
+          body=$(gh release view "$VERSION" --json body --jq .body)
+          if [ -z "${body//[[:space:]]/}" ]; then
+            echo "::error::GitHub release $VERSION has a blank body"; exit 1
+          fi

@@ -27,8 +27,8 @@ jobs:
       # step below. Naming this step "make check" previously implied it ran
       # the full check target — it doesn't — and a reviewer trusting that
       # name once left lint red for three tasks.
-      - name: make fmt-check vet tidy-check cover
-        run: make fmt-check vet tidy-check cover
+      - name: make fmt-check vet tidy-check cover changelog-test
+        run: make fmt-check vet tidy-check cover changelog-test
       - name: go build ./...
         run: go build ./...
       - name: api semantics (envtest)

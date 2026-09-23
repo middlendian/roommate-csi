@@ -5,7 +5,7 @@ GOFILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 export VERSION
 
-.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean ko ko-local envtest e2e
+.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean ko ko-local envtest e2e changelog-test
 
 build:
 	go build -o $(BIN)/roommate-node ./cmd/node
@@ -67,3 +67,6 @@ ko-local:
 
 e2e:
 	hack/e2e.sh
+
+changelog-test:
+	hack/changelog_test.sh
