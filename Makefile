@@ -2,7 +2,10 @@ BIN     := bin
 PKGS    := ./...
 GOFILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
-.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean docker envtest e2e
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+export VERSION
+
+.PHONY: build test test-race cover vet fmt fmt-check lint tidy tidy-check check clean ko ko-local envtest e2e
 
 build:
 	go build -o $(BIN)/roommate-node ./cmd/node
@@ -51,11 +54,16 @@ envtest:
 	KUBEBUILDER_ASSETS="$$(setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
 	go test -tags=envtest ./test/apisemantics/... -v
 
-IMAGE   ?= ghcr.io/middlendian/roommate-csi
-TAG     ?= dev
+IMAGE_REPO ?= ghcr.io/middlendian/roommate-csi
 
-docker:
-	docker build --build-arg VERSION=$(TAG) -t $(IMAGE):$(TAG) .
+# Build the image for every platform in .ko.yaml and discard it: a "does it
+# build" check that needs no registry and no Docker daemon.
+ko:
+	KO_DOCKER_REPO=$(IMAGE_REPO) ko build --bare --push=false ./cmd/node
+
+# Build for the host architecture and load it into the local Docker daemon.
+ko-local:
+	KO_DOCKER_REPO=ko.local ko build --bare --local --platform=linux/$$(go env GOARCH) ./cmd/node
 
 e2e:
 	hack/e2e.sh
