@@ -1,8 +1,32 @@
 name: e2e
+# Runs only when something that can change the image, the code under test,
+# or the deployed manifests changes. Docs-only changes (*.md, docs/) skip it.
+# Keep in sync with ci.yml, whose list is this one (minus this file) plus
+# the files only CI reads.
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".ko.yaml"
+      - "deploy/**"
+      - "hack/e2e.sh"
+      - "hack/kind.yaml"
+      - "Makefile"
+      - ".github/workflows/e2e.yml"
   pull_request:
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".ko.yaml"
+      - "deploy/**"
+      - "hack/e2e.sh"
+      - "hack/kind.yaml"
+      - "Makefile"
+      - ".github/workflows/e2e.yml"
   workflow_dispatch:
 
 jobs:

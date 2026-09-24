@@ -1,10 +1,45 @@
 name: ci
+# push is limited to main so a PR branch runs CI once (via pull_request),
+# not twice; e2e.yml uses the same split. Both are path-filtered: CI runs for
+# anything that can change the build, tests, lint, image, or manifests, and
+# skips docs-only changes (*.md other than CHANGELOG.md, docs/). This list is
+# e2e.yml's (minus e2e.yml itself) plus the files only CI reads.
 on:
-  # push is limited to main so a PR branch runs CI once (via pull_request),
-  # not twice; e2e.yml uses the same split.
   push:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".ko.yaml"
+      - "deploy/**"
+      - "hack/e2e.sh"
+      - "hack/kind.yaml"
+      - "Makefile"
+      - ".golangci.yml"
+      - "hack/changelog.sh"
+      - "hack/changelog_test.sh"
+      # changelog-test validates the real CHANGELOG.md, so it isn't a
+      # docs-only file as far as CI is concerned.
+      - "CHANGELOG.md"
+      - ".github/workflows/ci.yml"
   pull_request:
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".ko.yaml"
+      - "deploy/**"
+      - "hack/e2e.sh"
+      - "hack/kind.yaml"
+      - "Makefile"
+      - ".golangci.yml"
+      - "hack/changelog.sh"
+      - "hack/changelog_test.sh"
+      # changelog-test validates the real CHANGELOG.md, so it isn't a
+      # docs-only file as far as CI is concerned.
+      - "CHANGELOG.md"
+      - ".github/workflows/ci.yml"
 
 jobs:
   check:
