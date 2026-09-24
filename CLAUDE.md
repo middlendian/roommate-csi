@@ -255,8 +255,17 @@ A few things about the pipeline worth knowing before you touch it:
 - The ghcr.io package is created on the first release push and is private
   by default; make it public once so clusters can pull the image without
   credentials.
+- `release/*` branches are protected by the "release branches" ruleset,
+  which blocks creating, updating, and deleting them. Only the repo's
+  deploy key bypasses it. **Cut release** runs in the `prerelease`
+  environment (deployable from `main` only), whose `DEPLOY_KEY` secret is
+  that key's private half; the checkout uses it for SSH, so the branch push
+  goes through the deploy key and `GITHUB_TOKEN` only opens the PR.
 - If **Cut release** fails after pushing `release/vX.Y.Z` but before
-  opening the PR, delete that branch before re-running the workflow.
+  opening the PR, that branch must be deleted before re-running the
+  workflow. The ruleset blocks deletion, so this needs a ruleset bypass (or
+  the ruleset temporarily disabled). The same applies to cleaning up merged
+  release branches.
 - A tag ruleset on `refs/tags/v*` is optional. If you add one, restrict
   updates and deletions and block force pushes, but don't restrict
   creations: **Tag and publish** creates the tag with `GITHUB_TOKEN`. If a
