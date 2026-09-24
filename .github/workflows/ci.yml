@@ -1,45 +1,30 @@
 name: ci
-# push is limited to main so a PR branch runs CI once (via pull_request),
-# not twice; e2e.yml uses the same split. Both are path-filtered: CI runs for
-# anything that can change the build, tests, lint, image, or manifests, and
-# skips docs-only changes (*.md other than CHANGELOG.md, docs/). This list is
-# e2e.yml's (minus e2e.yml itself) plus the files only CI reads.
+# The single CI workflow: unit/lint/envtest (check), image build (image), and
+# the kind e2e suite (e2e), sharing one trigger list so they can't drift.
+#
+# push is limited to main so a PR branch runs once (via pull_request), not
+# twice. Both triggers are path-filtered to anything that can change the
+# build, tests, lint, image, or manifests; docs-only changes (*.md other
+# than CHANGELOG.md, docs/, examples/) skip CI entirely.
 on:
   push:
     branches: [main]
-    paths:
+    paths: &ci-paths
       - "**/*.go"
       - "go.mod"
       - "go.sum"
       - ".ko.yaml"
       - "deploy/**"
-      - "hack/e2e.sh"
-      - "hack/kind.yaml"
+      - "hack/**"
       - "Makefile"
       - ".golangci.yml"
-      - "hack/changelog.sh"
-      - "hack/changelog_test.sh"
       # changelog-test validates the real CHANGELOG.md, so it isn't a
       # docs-only file as far as CI is concerned.
       - "CHANGELOG.md"
       - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".ko.yaml"
-      - "deploy/**"
-      - "hack/e2e.sh"
-      - "hack/kind.yaml"
-      - "Makefile"
-      - ".golangci.yml"
-      - "hack/changelog.sh"
-      - "hack/changelog_test.sh"
-      # changelog-test validates the real CHANGELOG.md, so it isn't a
-      # docs-only file as far as CI is concerned.
-      - "CHANGELOG.md"
-      - ".github/workflows/ci.yml"
+    paths: *ci-paths
+  workflow_dispatch:
 
 jobs:
   check:
@@ -103,3 +88,18 @@ jobs:
         run: |
           ref=$(KO_DOCKER_REPO=ko.local ko build --bare --local --platform=linux/amd64 ./cmd/node)
           docker run --rm "$ref" -h
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - uses: ko-build/setup-ko@v0.10
+        with:
+          version: v0.19.1
+      - run: make e2e
