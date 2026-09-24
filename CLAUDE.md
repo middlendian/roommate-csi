@@ -39,7 +39,8 @@ examples/                  rbac.yaml (per-object Role+RoleBinding), pod.yaml
 hack/                      e2e.sh, kind.yaml, changelog.sh (+ _test.sh:
                            CHANGELOG promote/notes for release workflows)
 .ko.yaml                   image build: distroless, amd64+arm64
-.github/workflows/         cut-release -> tag-and-publish -> release
+.github/workflows/         ci (path-filtered), changelog (every PR);
+                           cut-release -> tag-and-publish -> release
 test/apisemantics/         envtest suite against a real apiserver + etcd
 test/e2e/                  kind, three nodes (1 control-plane + 2 workers); build tag: e2e
 docs/superpowers/specs/    design docs (v1, ko/release)
@@ -214,6 +215,9 @@ most of the unit suite.
 
 ## Pre-merge checklist
 
+- An entry under `## [Unreleased]` in `CHANGELOG.md`. Every PR needs one;
+  the `changelog` workflow fails the PR otherwise (it runs on all PRs, unlike
+  the path-filtered `ci` workflow).
 - `make build` and `make vet` clean.
 - `make test` (or `make test-race` for anything touching concurrency —
   `pkg/objectfs`, `pkg/mounts`, `pkg/driver`) passes.

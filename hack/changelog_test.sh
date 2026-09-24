@@ -63,6 +63,33 @@ grep -qx "\[Unreleased\]: $URL/compare/v0.2.0-rc.1...HEAD" "$TMP/second.md" && e
 "$CL" notes v0.2.0-rc.1 "$TMP/second.md" | grep -q 'Thing two' && echo "ok   notes stop at next section" || { echo "FAIL notes 0.2.0-rc.1"; fail=1; }
 "$CL" notes v0.2.0-rc.1 "$TMP/second.md" | grep -q 'Thing one' && { echo "FAIL notes leaked older section"; fail=1; } || echo "ok   notes exclude older section"
 
+# --- unreleased: the [Unreleased] body, used by CI's "PR edits it" check ---
+cat >"$TMP/unrel.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- A fix.
+
+## [0.1.0] - 2026-09-23
+
+- Old.
+
+[Unreleased]: https://github.com/middlendian/roommate-csi/compare/v0.1.0...HEAD
+EOF
+"$CL" unreleased "$TMP/unrel.md" >"$TMP/unrel.got"
+printf '\n### Fixed\n\n- A fix.\n\n' >"$TMP/unrel.want"
+check "unreleased stops at next version" "$TMP/unrel.want" "$TMP/unrel.got"
+"$CL" promote v0.2.0 2026-09-24 "$URL" "$TMP/unrel.md" >/dev/null
+"$CL" unreleased "$TMP/unrel.md" >"$TMP/unrel-empty.got"
+[[ -z "$(tr -d '[:space:]' <"$TMP/unrel-empty.got")" ]] && echo "ok   unreleased empty after promote" || { echo "FAIL unreleased not empty after promote"; fail=1; }
+printf '# Changelog\n\n## [Unreleased]\n\n- Only.\n\n[Unreleased]: %s/commits/main\n' "$URL" >"$TMP/unrel-links.md"
+"$CL" unreleased "$TMP/unrel-links.md" | grep -q 'commits/main' && { echo "FAIL unreleased leaked link refs"; fail=1; } || echo "ok   unreleased stops at link refs"
+printf '# Changelog\n\n## [0.1.0] - x\n' >"$TMP/no-unrel.md"
+expect_error "unreleased without heading" "$CL" unreleased "$TMP/no-unrel.md"
+
 # --- error cases ---
 # The duplicate-version guard needs its own file where [Unreleased] still
 # has content, so promoting an already-published version is rejected

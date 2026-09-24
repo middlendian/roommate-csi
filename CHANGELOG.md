@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- CI check (`changelog` workflow) that fails any PR that doesn't edit the
+  `## [Unreleased]` section of this file.
+
 ### Changed
 
 - The driver binary and image are built with Go 1.27.1 (previously 1.25).
