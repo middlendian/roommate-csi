@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The driver binary and image are built with Go 1.27.1 (previously 1.25).
+- Releases are tagged and published only by merging a `release/vX.Y.Z` PR
+  opened by **Cut release**; the **Tag and publish** workflow has no manual
+  trigger, and a `vX.Y.Z` tag that already exists at a different commit
+  fails the release instead of being published.
+
 ## [0.1.1] - 2026-09-23
 
 ### Fixed
