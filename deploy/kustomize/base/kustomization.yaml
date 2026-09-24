@@ -9,4 +9,4 @@ resources:
   - daemonset.yaml
 images:
   - name: ghcr.io/middlendian/roommate-csi
-    newTag: v0.1.0
+    newTag: v0.1.1
