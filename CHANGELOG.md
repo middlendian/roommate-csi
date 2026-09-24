@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-24
+
 ### Added
 
 - CI check (`changelog` workflow) that fails any PR that doesn't edit the
@@ -93,6 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it tags, pushes `ghcr.io/middlendian/roommate-csi:vX.Y.Z`, and creates
   a GitHub release from this file.
 
-[Unreleased]: https://github.com/middlendian/roommate-csi/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/middlendian/roommate-csi/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/middlendian/roommate-csi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/middlendian/roommate-csi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/middlendian/roommate-csi/releases/tag/v0.1.0
