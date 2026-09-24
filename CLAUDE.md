@@ -67,6 +67,12 @@ make ko-local    # ko build for the host arch into the local Docker daemon
 make changelog-test  # tests for hack/changelog.sh (CI gate)
 ```
 
+The Go version lives in one place: `go.mod`'s `toolchain` directive (the
+`go` directive is the language version). Every workflow's `setup-go` reads
+it with `go-version-file: go.mod`; bump it there and nowhere else. The
+`golangci-lint` version pinned in `ci.yml` must be built with a Go at least
+as new as the `go` directive.
+
 What each target needs beyond a Go toolchain:
 
 - `make test`, `make test-race`, `make cover`, `make vet`, `make build` —
@@ -79,13 +85,9 @@ What each target needs beyond a Go toolchain:
   that without another way to lint that package.
 - `make envtest` — `setup-envtest` on `PATH`, plus a downloaded etcd/
   kube-apiserver binary set (`setup-envtest use <version> -p path`, cached
-  under `~/.cache/kubebuilder-envtest` or platform equivalent). Pin
-  `setup-envtest` to a release whose own `go.mod` requires Go 1.25, not
-  1.26+ — as of this writing the versions published as the standalone
-  `sigs.k8s.io/controller-runtime/tools/setup-envtest` module (v0.24.0+)
-  all require Go 1.26. Installing an in-repo commit at the `v0.23.0` tag
-  (which still requires only Go 1.25) via its pseudo-version works instead:
-  `go install sigs.k8s.io/controller-runtime/tools/setup-envtest@<commit-of-v0.23.0>`.
+  under `~/.cache/kubebuilder-envtest` or platform equivalent). Install
+  the version CI pins in `.github/workflows/ci.yml`, e.g.
+  `go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.1`.
   This suite is what proves the claims a fake clientset can't: that
   merge-patch merges at the key level, that Lease CAS rejects a stale
   writer, that a quorum `GET` observes a just-completed patch, and that a

@@ -132,7 +132,7 @@ new image line is actually present in the rendered output) rather than
 silently deploying whatever tag `base` happens to reference. The base
 itself is not edited.
 
-`e2e.yml` adds `ko-build/setup-ko`. The e2e suite runs unchanged against
+The `e2e` job (in `ci.yml`) installs ko with `ko-build/setup-ko`. The e2e suite runs unchanged against
 the distroless image; this is the test that proves `DirectMount` and the
 `livenessprobe` sidecar work under a real kubelet, including
 `TestRefreshRaceProducesExactlyOneRefresh` and the node-plugin restart

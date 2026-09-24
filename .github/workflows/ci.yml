@@ -1,10 +1,30 @@
 name: ci
+# The single CI workflow: unit/lint/envtest (check), image build (image), and
+# the kind e2e suite (e2e), sharing one trigger list so they can't drift.
+#
+# push is limited to main so a PR branch runs once (via pull_request), not
+# twice. Both triggers are path-filtered to anything that can change the
+# build, tests, lint, image, or manifests; docs-only changes (*.md other
+# than CHANGELOG.md, docs/, examples/) skip CI entirely.
 on:
-  # push is limited to main so a PR branch runs CI once (via pull_request),
-  # not twice; e2e.yml uses the same split.
   push:
     branches: [main]
+    paths: &ci-paths
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".ko.yaml"
+      - "deploy/**"
+      - "hack/**"
+      - "Makefile"
+      - ".golangci.yml"
+      # changelog-test validates the real CHANGELOG.md, so it isn't a
+      # docs-only file as far as CI is concerned.
+      - "CHANGELOG.md"
+      - ".github/workflows/ci.yml"
   pull_request:
+    paths: *ci-paths
+  workflow_dispatch:
 
 jobs:
   check:
@@ -13,10 +33,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          # go.mod's toolchain directive is the single source of the Go version.
+          go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.5.0
+          # Must be built with a Go at least as new as go.mod's go directive.
+          version: v2.13.2
           args: --timeout=5m
       - name: enable FUSE allow_other
         # The pkg/objectfs FUSE tests mount with AllowOther, matching
@@ -35,15 +57,11 @@ jobs:
       - name: go build ./...
         run: go build ./...
       - name: api semantics (envtest)
-        # setup-envtest is released as its own module starting at v0.24.0,
-        # whose go.mod requires go >= 1.26 — incompatible with the go 1.25
-        # toolchain this repo (and the k8s.io libs pinned at v0.35.7) builds
-        # with. @latest resolves to that incompatible line and fails under
-        # actions/setup-go's GOTOOLCHAIN=local. Pin instead to a resolved
-        # commit off the release-0.23 branch, which predates the module
-        # split's go1.26 bump and still builds under go 1.25.
+        # setup-envtest is its own module (v0.24.0+); pinned rather than
+        # @latest so a new release can't change CI without a commit. Its
+        # go.mod needs go >= 1.26, which the go.mod toolchain satisfies.
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260305142021-f9589b9f2b9d
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.1
           make envtest
 
   image:
@@ -52,7 +70,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          # go.mod's toolchain directive is the single source of the Go version.
+          go-version-file: go.mod
       - uses: ko-build/setup-ko@v0.10
         with:
           version: v0.19.1
@@ -68,3 +87,19 @@ jobs:
         run: |
           ref=$(KO_DOCKER_REPO=ko.local ko build --bare --local --platform=linux/amd64 ./cmd/node)
           docker run --rm "$ref" -h
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          # go.mod's toolchain directive is the single source of the Go version.
+          go-version-file: go.mod
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - uses: ko-build/setup-ko@v0.10
+        with:
+          version: v0.19.1
+      - run: make e2e
