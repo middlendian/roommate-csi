@@ -1,29 +1,30 @@
-name: Tag and release
+name: Tag and publish
+# Expressions can't strip the "release/" prefix, so the title shows the head
+# branch (release/vX.Y.Z). Runs for non-release PRs (skipped by the detect
+# job) show their branch too.
+run-name: Tag and publish ${{ github.event.pull_request.head.ref }}
 
-# Triggered when a release PR (head branch release/vX.Y.Z) is merged into
-# main. The version comes from the head branch name, so squash and
-# merge-commit modes both work. Creates the vX.Y.Z tag at the merge commit,
-# then calls release.yml. workflow_dispatch re-runs a release by hand (e.g.
-# after a flake); every step is safe to repeat.
+# The only way to tag and publish a release: merging a release PR (head
+# branch release/vX.Y.Z, opened by cut-release.yml) into main. There is
+# deliberately no workflow_dispatch. The version comes from the head branch
+# name, so squash and merge-commit modes both work. Creates the vX.Y.Z tag
+# at the merge commit, then calls release.yml.
+#
+# To retry after a flake, use "Re-run failed jobs" on the run. That re-runs
+# the same commit's workflow files, so a bug in the pipeline itself is fixed
+# by merging the fix and cutting a new version, not by re-running.
 on:
   pull_request:
     types: [closed]
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (e.g. v0.1.1) — bypasses PR detection"
-        type: string
-        required: true
 
 permissions:
-  contents: write   # push tag, create GitHub release
+  contents: write   # push tag
 
-# A workflow_dispatch re-run and a PR-merge-triggered run must not execute
-# concurrently — both can create/push the same tag and both fan out into
-# release.yml. Never cancel an in-flight release to start another.
+# Two release PRs merged close together must not publish concurrently.
+# Never cancel an in-flight release to start another.
 concurrency:
-  group: tag-and-release
+  group: tag-and-publish
   cancel-in-progress: false
 
 jobs:
@@ -31,34 +32,26 @@ jobs:
     name: Detect release PR
     runs-on: ubuntu-latest
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       startsWith(github.event.pull_request.head.ref, 'release/v'))
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
     outputs:
       version: ${{ steps.detect.outputs.version }}
       sha: ${{ steps.detect.outputs.sha }}
     steps:
       - id: detect
         env:
-          DISPATCH_VERSION: ${{ inputs.version }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-          RUN_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           re='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
-          if [ -n "$DISPATCH_VERSION" ]; then
-            version="$DISPATCH_VERSION"; sha="$RUN_SHA"
-            echo "::notice::workflow_dispatch override: version=$version"
-          else
-            version="${PR_HEAD_REF#release/}"; sha="$PR_MERGE_SHA"
-            echo "::notice::Detected release PR: head=$PR_HEAD_REF version=$version"
-          fi
+          version="${PR_HEAD_REF#release/}"
+          echo "::notice::Detected release PR: head=$PR_HEAD_REF version=$version"
           if [[ ! "$version" =~ $re ]]; then
             echo "::error::version $version does not look like vX.Y.Z[-prerelease]"; exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "sha=$PR_MERGE_SHA" >> "$GITHUB_OUTPUT"
 
   tag:
     name: Create ${{ needs.detect.outputs.version }} tag
@@ -66,6 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.detect.outputs.version }}
+      MERGE_SHA: ${{ needs.detect.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -73,21 +67,25 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - name: Check for existing tag
-        # A workflow_dispatch re-run of an already-tagged version must skip
-        # verification too, not just creation: by the time main has moved
-        # on, deploy/kustomize/base/kustomization.yaml's newTag no longer
-        # matches this older $VERSION, and that's expected, not an error.
+        # An existing tag is accepted only if it already points at this
+        # PR's merge commit (a re-run of this same run). A tag pushed by
+        # hand, or left over from another commit, fails the run rather than
+        # publishing whatever it points at.
         id: check
         run: |
           set -euo pipefail
-          if git rev-parse "$VERSION" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
-            echo "::notice::tag $VERSION already exists; skipping verify and create"
+          git fetch --quiet origin "refs/tags/$VERSION:refs/tags/$VERSION" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            tagged=$(git rev-parse "$VERSION^{commit}")
+            if [ "$tagged" != "$MERGE_SHA" ]; then
+              echo "::error::tag $VERSION already exists at $tagged, not at this PR's merge commit $MERGE_SHA"; exit 1
+            fi
+            echo "::notice::tag $VERSION already exists at the merge commit; skipping create"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Verify kustomization newTag matches release version
-        if: steps.check.outputs.exists != 'true'
         run: |
           set -euo pipefail
           k=deploy/kustomize/base/kustomization.yaml

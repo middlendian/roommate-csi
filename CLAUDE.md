@@ -39,7 +39,7 @@ examples/                  rbac.yaml (per-object Role+RoleBinding), pod.yaml
 hack/                      e2e.sh, kind.yaml, changelog.sh (+ _test.sh:
                            CHANGELOG promote/notes for release workflows)
 .ko.yaml                   image build: distroless, amd64+arm64
-.github/workflows/         cut-release -> tag-and-release -> release
+.github/workflows/         cut-release -> tag-and-publish -> release
 test/apisemantics/         envtest suite against a real apiserver + etcd
 test/e2e/                  kind, three nodes (1 control-plane + 2 workers); build tag: e2e
 docs/superpowers/specs/    design docs (v1, ko/release)
@@ -236,26 +236,41 @@ most of the unit suite.
 
 Run the **Cut release** workflow with `vX.Y.Z` (needs a non-empty
 `## [Unreleased]` section in `CHANGELOG.md`), then review and merge the
-`release/vX.Y.Z` PR it opens. Merging triggers **Tag and release**, which
+`release/vX.Y.Z` PR it opens. Merging triggers **Tag and publish**, which
 tags the merge commit, pushes the multi-arch image, and creates the GitHub
-release. To re-run a release (e.g. after a flake), dispatch **Tag and
-release** by hand with the version.
+release. Merging a release PR is the only way to tag and publish: **Tag and
+publish** has no manual trigger, and `release.yml` is only callable from it.
+To retry after a flake, use "Re-run failed jobs" on that run. A re-run uses
+the same commit's workflow files, so a bug in the pipeline itself is fixed
+by merging the fix and cutting a new version.
 
 A few things about the pipeline worth knowing before you touch it:
 
 - The repo setting "Allow GitHub Actions to create and approve pull
   requests" (Settings → Actions → General) must be enabled, or **Cut
   release**'s `gh pr create` fails.
-- The release PR is opened with `GITHUB_TOKEN`, so `pull_request` CI does
-  not run on it — the **Tag and release** run is where problems actually
-  show up.
+- CI runs on the release PR, but it can't exercise the release workflows
+  themselves — the **Tag and publish** run is where problems in those show
+  up.
 - The ghcr.io package is created on the first release push and is private
   by default; make it public once so clusters can pull the image without
   credentials.
+- `release/*` branches are protected by the "release branches" ruleset,
+  which blocks creating, updating, and deleting them. Only the repo's
+  deploy key bypasses it. **Cut release** runs in the `prerelease`
+  environment (deployable from `main` only), whose `DEPLOY_KEY` secret is
+  that key's private half; the checkout uses it for SSH, so the branch push
+  goes through the deploy key and `GITHUB_TOKEN` only opens the PR.
 - If **Cut release** fails after pushing `release/vX.Y.Z` but before
-  opening the PR, delete that branch before re-running the workflow.
-- A tag ruleset on `refs/tags/v*` is recommended, though not required by
-  the pipeline itself.
+  opening the PR, that branch must be deleted before re-running the
+  workflow. The ruleset blocks deletion, so this needs a ruleset bypass (or
+  the ruleset temporarily disabled). The same applies to cleaning up merged
+  release branches.
+- A tag ruleset on `refs/tags/v*` is optional. If you add one, restrict
+  updates and deletions and block force pushes, but don't restrict
+  creations: **Tag and publish** creates the tag with `GITHUB_TOKEN`. If a
+  `vX.Y.Z` tag already exists at a different commit (e.g. pushed by hand),
+  **Tag and publish** fails rather than publishing it.
 - **A prerelease consumes `[Unreleased]`, same as a final release.**
   Promoting `vX.Y.Z-rc.N` moves everything out of `## [Unreleased]` into its
   own section, same as promoting a final version — there's no separate

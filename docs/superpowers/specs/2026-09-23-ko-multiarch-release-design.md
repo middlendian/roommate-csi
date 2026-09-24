@@ -157,17 +157,20 @@ the workflow treats this as the first release: the new version's link is
 `…/releases/tag/vX.Y.Z` and `[Unreleased]` becomes
 `…/compare/vX.Y.Z...HEAD`. The PR body says "from `dev`" for the tag bump.
 
-### `tag-and-release.yml` (PR closed on main, or workflow_dispatch)
+### `tag-and-publish.yml` (PR closed on main only)
 
-Identical to fileblock's: runs only for a merged PR whose head ref starts
-with `release/v`, reads the version from the branch name, verifies
-`newTag` matches, creates and pushes the annotated tag, then calls
-`release.yml`. The tag job checks for the tag first (locally and on
-`origin`) and skips both the `newTag` verification and the create/push
-steps when it already exists, so a `workflow_dispatch` re-run after main
-has moved past that version — where `newTag` legitimately no longer
-matches — doesn't fail spuriously. `workflow_dispatch` is the re-run
-escape hatch.
+Based on fileblock's `tag-and-release.yml`: runs only for a merged PR whose
+head ref starts with `release/v`, reads the version from the branch name,
+verifies `newTag` matches, creates and pushes the annotated tag at the
+merge commit, then calls `release.yml`.
+
+Unlike fileblock's, it has **no `workflow_dispatch`**: merging a release PR
+is the only way to tag and publish. Retrying after a flake is "Re-run
+failed jobs" on the run. That uses the same commit's workflow files, so a
+bug in the pipeline is fixed by merging the fix and cutting a new version.
+An existing tag is accepted only if it already points at the PR's merge
+commit (a re-run); a tag at any other commit, such as one pushed by hand,
+fails the run instead of being published.
 
 ### `release.yml` (workflow_call, input `version`)
 
@@ -188,8 +191,8 @@ Two jobs instead of fileblock's three:
   fileblock's set (title, description, url, source, version, revision,
   licenses=GPL-3.0-only — this repo's `LICENSE` is plain GPLv3 with no "or
   later" grant). `revision` is `git rev-parse HEAD` read after checkout at
-  the tag, not `github.sha`: on a `workflow_dispatch` re-run `github.sha`
-  is the dispatching branch's head, not the tagged commit. ko pushes both
+  the tag, not `github.sha`, which for a `pull_request` event is the PR's
+  test-merge commit rather than the tagged commit. ko pushes both
   platform images and the index in one step, which replaces fileblock's
   per-arch matrix and its `imagetools create` manifest job.
 - **`release`** — `needs: image`, so a GitHub release never exists

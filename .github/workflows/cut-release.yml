@@ -1,8 +1,16 @@
 name: Cut release
+run-name: Cut release ${{ inputs.version }}
 
 # Creates a release/vX.Y.Z branch from main with the CHANGELOG promoted and
 # the kustomization newTag bumped, then opens a PR. Merging the PR triggers
-# tag-and-release.yml, which creates the tag and runs the publish pipeline.
+# tag-and-publish.yml, which creates the tag and runs the publish pipeline;
+# merging a release PR is the only way to tag and publish.
+#
+# release/* branches are protected by a ruleset that blocks creating them;
+# only the repo's deploy key can bypass it. The job runs in the
+# "prerelease" environment (deployable from main only) to get that key as
+# the DEPLOY_KEY secret, and every git operation against origin goes over
+# SSH with it. GITHUB_TOKEN is used only for the GitHub API (gh pr create).
 on:
   workflow_dispatch:
     inputs:
@@ -12,13 +20,14 @@ on:
         required: true
 
 permissions:
-  contents: write       # push branch
+  contents: read        # the branch push uses DEPLOY_KEY, not GITHUB_TOKEN
   pull-requests: write  # open PR
 
 jobs:
   cut:
     name: Cut ${{ inputs.version }}
     runs-on: ubuntu-latest
+    environment: prerelease
     env:
       VERSION: ${{ inputs.version }}
       BRANCH: release/${{ inputs.version }}
@@ -28,6 +37,9 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # Makes origin an SSH remote authenticated by the deploy key, so
+          # the ls-remote checks and the branch push below all use it.
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
       - name: Check tag and branch don't exist
         run: |
@@ -83,7 +95,7 @@ jobs:
 
           ## Merge instructions
 
-          Squash-merge or merge-commit both work. \`tag-and-release.yml\` reads
+          Squash-merge or merge-commit both work. \`tag-and-publish.yml\` reads
           the version from the PR's head branch name (\`$BRANCH\`), not the
           commit message.
 

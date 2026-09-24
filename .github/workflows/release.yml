@@ -1,7 +1,7 @@
 name: Release
 
-# Reusable workflow, called by tag-and-release.yml after it creates the
-# vX.Y.Z tag. Not triggered by tag pushes directly.
+# Reusable workflow, called only by tag-and-publish.yml after it creates the
+# vX.Y.Z tag for a merged release PR. It has no trigger of its own.
 on:
   workflow_call:
     inputs:
@@ -48,14 +48,14 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # github.sha is the caller's event SHA — on workflow_dispatch
-          # that's the dispatching branch head, not the tag commit. Read the
-          # actual commit checked out at $VERSION instead.
+          # github.sha is the caller's event SHA (for a pull_request event,
+          # the PR's test-merge commit), not necessarily the tagged commit.
+          # Read the commit actually checked out at $VERSION instead.
           REVISION=$(git rev-parse HEAD)
           tags="$TAG"
           # :latest only for non-prereleases (SemVer prerelease has a '-').
-          # A workflow_dispatch re-run of an older non-prerelease version
-          # moves :latest back to it — this doesn't check recency.
+          # Re-running an older release's run moves :latest back to that
+          # version — this doesn't check recency.
           [[ "$TAG" == *-* ]] || tags="$tags,latest"
           # ko splits each --image-label value on commas, so no label value
           # may contain one: the text after a comma becomes a separate,
@@ -88,8 +88,8 @@ jobs:
           hack/changelog.sh notes "$VERSION" > "$RUNNER_TEMP/release-notes.md"
           echo "::group::Release notes for $VERSION"; cat "$RUNNER_TEMP/release-notes.md"; echo "::endgroup::"
       - name: Create or update GitHub release
-        # Editing when it already exists makes a workflow_dispatch re-run of
-        # a half-finished release succeed instead of failing here.
+        # Editing when it already exists makes a re-run of a half-finished
+        # release succeed instead of failing here.
         run: |
           set -euo pipefail
           if gh release view "$VERSION" >/dev/null 2>&1; then
