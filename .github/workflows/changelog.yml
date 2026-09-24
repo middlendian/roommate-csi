@@ -1,0 +1,36 @@
+name: changelog
+# Every PR must edit the [Unreleased] section of CHANGELOG.md, so Cut release
+# never finds it empty. A release PR passes too: promoting moves the entries
+# out of [Unreleased], which is an edit.
+#
+# This is its own workflow, not a job in ci.yml, because ci.yml is
+# path-filtered (paths apply to a whole workflow) and this check must run on
+# every PR, docs-only ones included.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unreleased-edited:
+    name: "[Unreleased] edited"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The default ref is the PR's merge result; the base commit must be
+          # fetched too, to compare against.
+          fetch-depth: 0
+      - name: Compare [Unreleased] with the base branch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:CHANGELOG.md" > "$RUNNER_TEMP/base-CHANGELOG.md"
+          if [ "$(hack/changelog.sh unreleased "$RUNNER_TEMP/base-CHANGELOG.md")" = "$(hack/changelog.sh unreleased CHANGELOG.md)" ]; then
+            echo "::error file=CHANGELOG.md::This PR doesn't edit the ## [Unreleased] section of CHANGELOG.md. Add an entry describing the change (every PR needs one)."
+            exit 1
+          fi
+          echo "[Unreleased] edited:"
+          hack/changelog.sh unreleased CHANGELOG.md

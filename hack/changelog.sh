@@ -9,6 +9,10 @@
 #       or nothing on the first release.
 #   changelog.sh notes <vX.Y.Z> [file]
 #       Print the body of that version's section.
+#   changelog.sh unreleased [file]
+#       Print the body of the [Unreleased] section (possibly empty). CI
+#       compares it between a PR's base and merge result to require that
+#       every PR edits it.
 set -euo pipefail
 
 VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
@@ -63,9 +67,21 @@ notes() {
   printf '%s' "$out"
 }
 
+unreleased() {
+  local file="${1:-CHANGELOG.md}"
+  grep -qx '## \[Unreleased\]' "$file" || die "no '## [Unreleased]' heading in $file"
+  awk '
+    /^## \[Unreleased\]$/ { printing = 1; next }
+    printing && /^## \[/ { exit }
+    printing && /^\[.+\]:/ { exit }
+    printing { print }
+  ' "$file"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   promote) [[ $# -ge 3 ]] || die "usage: promote <vX.Y.Z> <YYYY-MM-DD> <repo-url> [file]"; promote "$@" ;;
   notes)   [[ $# -ge 1 ]] || die "usage: notes <vX.Y.Z> [file]"; notes "$@" ;;
-  *) die "usage: changelog.sh {promote|notes} ..." ;;
+  unreleased) unreleased "$@" ;;
+  *) die "usage: changelog.sh {promote|notes|unreleased} ..." ;;
 esac
